@@ -55,24 +55,34 @@ namespace counter {
         int window() const { return early + late + 1; }
     };
 
+    enum class Mode { Disabled = 0, Record = 1, Playback = 2 };
+
     void onLevelEnter(PlayLayer*);
     bool filterInput(bool down, int button, bool p1);              // false = swallow the real input
     void onInput(GJBaseGameLayer*, bool down, int button, bool p1);
     void beforeStep(GJBaseGameLayer*);                             // inject macro / show cues
     bool onDeath(PlayLayer*);                                      // true = swallow the death
     bool onComplete(PlayLayer*);                                   // true = swallow level complete
-    void onReset(PlayLayer*);
+    void onReset(PlayLayer*);                                      // after a reset AND after a checkpoint load
     void update(PlayLayer*);                                       // state machine, once per frame
 
-    void armRecording();
-    void stopRecording();
+    Mode mode();
+    void setMode(Mode);
     void startCounting();
     void cancelCounting();
-    void clearAll();
     bool isRecording();
     bool isCounting();
     std::string statusText();
     std::string summaryText();
+
+    // replay files (each returns a short message for the user)
+    std::string currentName();
+    void selectReplay(int delta);
+    std::string newReplay(std::string const& name);
+    std::string saveReplay();
+    std::string loadReplay();
+    std::string deleteReplay();
+    void openReplaysFolder();
 }
 
 namespace hud {
@@ -82,9 +92,11 @@ namespace hud {
 }
 
 namespace ui {
-    void open();
-    // Adds the toolkit button (own icon) to a menu.
-    CCMenuItemSpriteExtra* makeButton(cocos2d::CCObject* target, cocos2d::SEL_MenuHandler cb, float scale);
+    void open();                 // opens the toolkit menu
+    bool isOpen();
+    void spawnButton();          // creates the floating, draggable menu button (shown in every scene)
+    void refreshButton();        // re-applies size after the slider changed
+    cocos2d::CCSprite* modSprite(char const* name);   // one of this mod's own images
 }
 
 } // namespace kt

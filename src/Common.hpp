@@ -84,7 +84,7 @@ namespace hud {
 namespace ui {
     void open();
     // Adds the toolkit button (own icon) to a menu.
-    cocos2d::CCMenuItemSpriteExtra* makeButton(cocos2d::CCObject* target, cocos2d::SEL_MenuHandler cb, float scale);
+    CCMenuItemSpriteExtra* makeButton(cocos2d::CCObject* target, cocos2d::SEL_MenuHandler cb, float scale);
 }
 
 } // namespace kt

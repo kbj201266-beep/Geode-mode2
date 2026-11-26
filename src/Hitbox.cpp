@@ -1,4 +1,6 @@
 #include "Common.hpp"
+#include <algorithm>
+#include <cmath>
 #include <deque>
 
 using namespace geode::prelude;
@@ -34,7 +36,8 @@ namespace {
     void drawObject(CCDrawNode* n, GameObject* o) {
         ccColor3B col;
         switch (o->m_objectType) {
-            case GameObjectType::Hazard: col = {255, 60, 60}; break;
+            case GameObjectType::Hazard:
+            case GameObjectType::AnimatedHazard: col = {255, 60, 60}; break;
             case GameObjectType::Solid:
             case GameObjectType::Slope: col = {70, 130, 255}; break;
             case GameObjectType::Decoration:
@@ -43,8 +46,8 @@ namespace {
         }
         // Rotated objects carry an oriented box; everything else is an axis aligned rect.
         if (o->m_orientedBox) {
-            auto b = o->m_orientedBox;
-            poly(n, {b->m_p1, b->m_p2, b->m_p3, b->m_p4}, col, true);
+            auto& c = o->m_orientedBox->m_corners;   // std::array<CCPoint, 4> in 2.2091
+            poly(n, std::vector<CCPoint>(c.begin(), c.end()), col, true);
         } else {
             poly(n, corners(o->getObjectRect()), col, true);
         }

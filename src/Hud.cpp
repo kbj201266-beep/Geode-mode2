@@ -16,9 +16,10 @@ void attach(PlayLayer* pl) {
     auto info = CCLabelBMFont::create("", "bigFont.fnt");
     info->setID(kInfoId);
     info->setScale(0.32f);
-    info->setAnchorPoint({0.f, 1.f});
+    info->setAnchorPoint({1.f, 0.f});          // bottom right, so it never covers the counter stats
+    info->setAlignment(kCCTextAlignmentRight);
     info->setOpacity(190);
-    info->setPosition({8.f, win.height - 8.f});
+    info->setPosition({win.width - 8.f, 8.f});
     pl->m_uiLayer->addChild(info, 100);
 
     auto flash = CCLabelBMFont::create("", "bigFont.fnt");

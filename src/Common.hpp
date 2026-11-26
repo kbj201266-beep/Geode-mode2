@@ -28,7 +28,7 @@ namespace noclip {
 
 namespace speed {
     void apply();              // speedhack time scale + music pitch
-    float modifiedDelta(GJBaseGameLayer*, float dt);   // physical TPS
+    double modifiedDelta(GJBaseGameLayer*, float dt);  // physical TPS
     void onStep();             // counts physics steps for the TPS readout
     float measuredTps();
 }

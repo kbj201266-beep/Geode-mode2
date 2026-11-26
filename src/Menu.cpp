@@ -1,7 +1,9 @@
 // The toolkit menu: dark rounded panel, icon sidebar on the left, settings on the right.
 // Built on FLAlertLayer directly (no Popup template) so it does not depend on the Popup API of a given Geode version.
 #include "Common.hpp"
+#include <cmath>
 #include <cstdio>
+#include <functional>
 
 using namespace geode::prelude;
 
@@ -12,21 +14,101 @@ namespace {
     constexpr ccColor3B kSide{16, 19, 27};
     constexpr ccColor3B kAccent{77, 214, 164};
     constexpr ccColor3B kMuted{120, 128, 145};
+    constexpr ccColor3B kText{225, 230, 240};
 
-    enum Tab { Cheats, Hitbox, Path, Display, Counter, TabCount };
+    enum Tab { Cheats, Hitbox, Path, Display, Replay, Counter, TabCount };
     constexpr char const* kTabIcons[TabCount] = {"kt_tab_hacks.png", "kt_tab_hitbox.png", "kt_tab_path.png",
-                                                  "kt_tab_display.png", "kt_tab_counter.png"};
-    constexpr char const* kTabNames[TabCount] = {"Cheats", "Hitbox", "Pathfinder", "Display", "Window counter"};
+                                                  "kt_tab_display.png", "kt_tab_speed.png", "kt_tab_counter.png"};
+    constexpr char const* kTabNames[TabCount] = {"Cheats", "Hitbox", "Pathfinder", "Display", "Replay", "Window counter"};
 
-    // Loads one of this mod's own sprites. Works whatever type expandSpriteName returns in this Geode version.
-    CCSprite* modSprite(char const* name) {
-        std::string path(Mod::get()->expandSpriteName(name));
-        return CCSprite::create(path.c_str());
+    bool g_open = false;
+
+    void note(std::string const& msg) {
+        Notification::create(msg.c_str(), NotificationIcon::Info, 1.8f)->show();
     }
 
     struct BoolRef { bool* v; bool restart; };
     struct SliderRef { float* f; int* i; float lo, hi; CCLabelBMFont* label; char const* fmt; };
 
+    // ---------------------------------------------------------------- name prompt (New replay)
+    class NamePrompt : public FLAlertLayer {
+    public:
+        static NamePrompt* create(std::function<void(std::string const&)> cb) {
+            auto r = new NamePrompt();
+            r->m_cb = std::move(cb);
+            if (r->setup()) { r->autorelease(); return r; }
+            CC_SAFE_DELETE(r);
+            return nullptr;
+        }
+
+    private:
+        std::function<void(std::string const&)> m_cb;
+        TextInput* m_input = nullptr;
+
+        bool setup() {
+            if (!FLAlertLayer::init(150)) return false;
+            this->setTouchEnabled(true);
+            this->setKeypadEnabled(true);
+            m_noElasticity = true;
+
+            m_mainLayer = CCLayer::create();
+            this->addChild(m_mainLayer);
+            m_buttonMenu = CCMenu::create();
+            m_buttonMenu->setPosition({0.f, 0.f});
+            m_mainLayer->addChild(m_buttonMenu, 10);
+
+            auto win = CCDirector::get()->getWinSize();
+            auto c = ccp(win.width / 2, win.height / 2);
+
+            auto panel = CCScale9Sprite::create("square02b_001.png");
+            panel->setContentSize({290.f, 150.f});
+            panel->setColor(kPanel);
+            panel->setOpacity(250);
+            panel->setPosition(c);
+            m_mainLayer->addChild(panel);
+
+            auto title = CCLabelBMFont::create("New replay", "bigFont.fnt");
+            title->setScale(0.5f);
+            title->setColor(kAccent);
+            title->setPosition(c + ccp(0.f, 50.f));
+            m_mainLayer->addChild(title);
+
+            m_input = TextInput::create(230.f, "Replay name");
+            m_input->setPosition(c + ccp(0.f, 8.f));
+            m_input->setMaxCharCount(24);
+            m_input->setFilter("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-");
+            m_mainLayer->addChild(m_input, 5);
+
+            auto cancel = CCMenuItemSpriteExtra::create(
+                ButtonSprite::create("Cancel", 90, true, "bigFont.fnt", "GJ_button_04.png", 24.f, 0.5f), this,
+                menu_selector(NamePrompt::onCancel));
+            cancel->setPosition(c + ccp(-62.f, -44.f));
+            m_buttonMenu->addChild(cancel);
+            auto create = CCMenuItemSpriteExtra::create(
+                ButtonSprite::create("Create", 90, true, "bigFont.fnt", "GJ_button_01.png", 24.f, 0.5f), this,
+                menu_selector(NamePrompt::onCreate));
+            create->setPosition(c + ccp(62.f, -44.f));
+            m_buttonMenu->addChild(create);
+
+            this->show();
+            return true;
+        }
+
+        void close() {
+            this->setKeypadEnabled(false);
+            this->removeFromParentAndCleanup(true);
+        }
+        void keyBackClicked() override { close(); }
+        void onCancel(CCObject*) { close(); }
+        void onCreate(CCObject*) {
+            auto cb = m_cb;
+            std::string name = m_input->getString();
+            close();
+            if (cb) cb(name);
+        }
+    };
+
+    // ---------------------------------------------------------------- main menu
     class ToolkitMenu : public FLAlertLayer {
     public:
         static ToolkitMenu* create() {
@@ -35,9 +117,10 @@ namespace {
             CC_SAFE_DELETE(r);
             return nullptr;
         }
+        ~ToolkitMenu() { g_open = false; }
 
     private:
-        static constexpr float W = 460.f, H = 280.f, SIDE = 64.f;
+        static constexpr float W = 460.f, H = 300.f, SIDE = 64.f;
         CCNode* m_content = nullptr;
         CCMenu* m_contentMenu = nullptr;
         std::vector<CCMenuItemSpriteExtra*> m_tabBtns;
@@ -45,7 +128,9 @@ namespace {
         std::vector<SliderRef> m_sliders;
         CCLabelBMFont* m_status = nullptr;
         CCLabelBMFont* m_summary = nullptr;
-        int m_tab = Cheats;
+        CCLabelBMFont* m_nameLabel = nullptr;
+        CCMenuItemToggler* m_radios[3] = {nullptr, nullptr, nullptr};
+        int m_tab = Replay;
         float m_y = 0.f;
 
         bool setup() {
@@ -53,6 +138,7 @@ namespace {
             this->setTouchEnabled(true);
             this->setKeypadEnabled(true);
             m_noElasticity = true;
+            g_open = true;
 
             m_mainLayer = CCLayer::create();
             this->addChild(m_mainLayer);
@@ -67,7 +153,7 @@ namespace {
             panel->setContentSize({W, H});
             panel->setColor(kPanel);
             panel->setOpacity(245);
-            panel->setPosition(win / 2);
+            panel->setPosition(ccp(win.width / 2, win.height / 2));
             m_mainLayer->addChild(panel);
 
             auto side = CCScale9Sprite::create("square02b_001.png");
@@ -83,7 +169,7 @@ namespace {
                 icon->setScale(0.34f);
                 auto btn = CCMenuItemSpriteExtra::create(icon, this, menu_selector(ToolkitMenu::onTab));
                 btn->setTag(i);
-                btn->setPosition(origin + ccp(SIDE / 2 + 6.f, H - 40.f - i * 46.f));
+                btn->setPosition(origin + ccp(SIDE / 2 + 6.f, H - 36.f - i * 42.f));
                 m_buttonMenu->addChild(btn);
                 m_tabBtns.push_back(btn);
             }
@@ -108,6 +194,7 @@ namespace {
         void keyBackClicked() override { onClose(nullptr); }
         void onClose(CCObject*) {
             Cfg::get().save();
+            g_open = false;
             this->setKeypadEnabled(false);
             this->removeFromParentAndCleanup(true);
         }
@@ -127,30 +214,30 @@ namespace {
             return l;
         }
 
+        float contentW() const { return W - SIDE - 56.f; }
+
         void addToggle(char const* label, bool& ref, bool restart = false) {
-            float contentW = W - SIDE - 56.f;
-            text(label, 0.f, m_y, 0.38f, {225, 230, 240}, m_content);
+            text(label, 0.f, m_y, 0.38f, kText, m_content);
             auto t = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(ToolkitMenu::onToggle), 0.55f);
             t->toggle(ref);
             t->setTag(static_cast<int>(m_bools.size()));
-            t->setPosition({contentW, m_y});
+            t->setPosition({contentW(), m_y});
             m_contentMenu->addChild(t);
             m_bools.push_back({&ref, restart});
             m_y -= 30.f;
         }
 
         void addSlider(char const* label, float* f, int* i, float lo, float hi, char const* fmt) {
-            float contentW = W - SIDE - 56.f;
-            text(label, 0.f, m_y, 0.38f, {225, 230, 240}, m_content);
+            text(label, 0.f, m_y, 0.38f, kText, m_content);
             auto sl = Slider::create(this, menu_selector(ToolkitMenu::onSlider), 0.55f);
             float cur = f ? *f : static_cast<float>(*i);
             sl->setValue((cur - lo) / (hi - lo));
-            sl->setPosition({contentW - 78.f, m_y});
+            sl->setPosition({contentW() - 78.f, m_y});
             sl->getThumb()->setTag(static_cast<int>(m_sliders.size()));
             m_content->addChild(sl);
             char buf[32];
             std::snprintf(buf, sizeof buf, fmt, cur);
-            auto val = text(buf, contentW + 10.f, m_y, 0.32f, kAccent, m_content, 1.f);
+            auto val = text(buf, contentW() + 10.f, m_y, 0.32f, kAccent, m_content, 1.f);
             m_sliders.push_back({f, i, lo, hi, val, fmt});
             m_y -= 30.f;
         }
@@ -160,7 +247,7 @@ namespace {
             auto& r = m_bools[t->getTag()];
             *r.v = !t->isToggled();
             Cfg::get().save();
-            if (r.restart) Notification::create("Applies after restarting the level", NotificationIcon::Info, 1.6f)->show();
+            if (r.restart) note("Applies after restarting the level");
         }
 
         void onSlider(CCObject* s) {
@@ -171,10 +258,11 @@ namespace {
             if (r.i) { *r.i = static_cast<int>(std::round(val)); std::snprintf(buf, sizeof buf, r.fmt, static_cast<float>(*r.i)); }
             else { *r.f = std::round(val * 100.f) / 100.f; std::snprintf(buf, sizeof buf, r.fmt, *r.f); }
             r.label->setString(buf);
+            refreshButton();
         }
 
-        CCMenuItemSpriteExtra* addButton(char const* caption, float x, float y, SEL_MenuHandler cb, char const* tex) {
-            auto spr = ButtonSprite::create(caption, 70, true, "bigFont.fnt", tex, 24.f, 0.5f);
+        CCMenuItemSpriteExtra* addButton(char const* caption, float x, float y, SEL_MenuHandler cb, char const* tex, int width = 70) {
+            auto spr = ButtonSprite::create(caption, width, true, "bigFont.fnt", tex, 24.f, 0.5f);
             auto b = CCMenuItemSpriteExtra::create(spr, this, cb);
             b->setPosition({x, y});
             m_contentMenu->addChild(b);
@@ -186,11 +274,11 @@ namespace {
             m_content->removeAllChildrenWithCleanup(true);
             m_bools.clear();
             m_sliders.clear();
-            m_status = m_summary = nullptr;
+            m_status = m_summary = m_nameLabel = nullptr;
+            for (auto& r : m_radios) r = nullptr;
             m_contentMenu = CCMenu::create();
             m_contentMenu->setPosition({0.f, 0.f});
             m_content->addChild(m_contentMenu, 2);
-            m_y = -14.f;
 
             for (int i = 0; i < TabCount; ++i) {
                 auto spr = static_cast<CCSprite*>(m_tabBtns[i]->getNormalImage());
@@ -214,6 +302,7 @@ namespace {
                     addToggle("Show hitboxes", c.hitboxes);
                     addToggle("Player hitbox", c.playerHitbox);
                     addToggle("Hitbox trail", c.hitboxTrail);
+                    addToggle("Hitborders (NaN style)", c.hitborders);
                     addSlider("Trail length", nullptr, &c.trailLen, 5.f, 200.f, "%.0f");
                     addSlider("Fill opacity", &c.hitFill, nullptr, 0.f, 1.f, "%.2f");
                     addSlider("Border width", &c.hitBorder, nullptr, 0.5f, 4.f, "%.1f");
@@ -226,57 +315,122 @@ namespace {
                 case Display:
                     addToggle("Layout mode", c.layoutMode, true);
                     addToggle("Practice music sync", c.practiceSync);
+                    addToggle("Counter overlay", c.counterOverlay);
                     addToggle("Window cue on screen", c.counterHud);
                     addToggle("Window cue sound", c.counterSfx);
+                    addSlider("Menu button size", &c.btnScale, nullptr, 0.3f, 1.2f, "%.2f");
+                    text("drag the round button to move it", 0.f, m_y - 2.f, 0.3f, kMuted, m_content);
                     break;
+                case Replay: buildReplay(); break;
                 case Counter: buildCounter(); break;
                 default: break;
             }
+            tick(0.f);
+        }
+
+        // Replay tab: same layout as a bot menu - mode, replay picker, ignore inputs, file buttons.
+        void buildReplay() {
+            float cw = contentW();
+            char const* names[3] = {"Disabled", "Record", "Playback"};
+            float xs[3] = {2.f, 108.f, 214.f};
+            for (int i = 0; i < 3; ++i) {
+                auto t = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(ToolkitMenu::onMode), 0.55f);
+                t->setTag(i);
+                t->setPosition({xs[i] + 12.f, m_y});
+                m_contentMenu->addChild(t);
+                m_radios[i] = t;
+                text(names[i], xs[i] + 30.f, m_y, 0.36f, kText, m_content);
+            }
+            m_y -= 30.f;
+
+            text("Replays", 0.f, m_y, 0.38f, kText, m_content);
+            auto left = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
+            left->setScale(0.5f);
+            auto lb = CCMenuItemSpriteExtra::create(left, this, menu_selector(ToolkitMenu::onPrev));
+            lb->setPosition({cw - 178.f, m_y});
+            m_contentMenu->addChild(lb);
+            auto right = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
+            right->setScale(0.5f);
+            right->setFlipX(true);
+            auto rb = CCMenuItemSpriteExtra::create(right, this, menu_selector(ToolkitMenu::onNext));
+            rb->setPosition({cw - 12.f, m_y});
+            m_contentMenu->addChild(rb);
+            m_nameLabel = text("", cw - 95.f, m_y, 0.32f, kAccent, m_content, 0.5f);
+            m_y -= 30.f;
+
+            addToggle("Ignore Inputs", Cfg::get().ignoreInputs);
+
+            float bx = cw / 2.f;
+            char const* tex = "GJ_button_04.png";
+            addButton("New", bx, m_y, menu_selector(ToolkitMenu::onNew), tex, 230);
+            m_y -= 28.f;
+            addButton("Save", bx, m_y, menu_selector(ToolkitMenu::onSave), tex, 230);
+            m_y -= 28.f;
+            addButton("Load", bx, m_y, menu_selector(ToolkitMenu::onLoad), tex, 230);
+            m_y -= 28.f;
+            addButton("Delete", bx, m_y, menu_selector(ToolkitMenu::onDelete), tex, 230);
+            m_y -= 28.f;
+            addButton("Open Replays Folder", bx, m_y, menu_selector(ToolkitMenu::onFolder), tex, 230);
         }
 
         void buildCounter() {
-            float cw = W - SIDE - 56.f;
-            m_status = text("", 0.f, -42.f, 0.36f, {225, 230, 240}, m_content);
-            addButton("Record", 38.f, -72.f, menu_selector(ToolkitMenu::onRecord), "GJ_button_01.png");
-            addButton("Stop", 116.f, -72.f, menu_selector(ToolkitMenu::onStopRec), "GJ_button_06.png");
-            addButton("Count", 194.f, -72.f, menu_selector(ToolkitMenu::onCount), "GJ_button_01.png");
-            addButton("Cancel", 272.f, -72.f, menu_selector(ToolkitMenu::onCancel), "GJ_button_06.png");
-            addButton("Clear", cw - 28.f, -72.f, menu_selector(ToolkitMenu::onClear), "GJ_button_06.png");
-            m_summary = text("", 0.f, -132.f, 0.3f, kMuted, m_content);
-            m_summary->setAlignment(kCCTextAlignmentLeft);
+            float cw = contentW();
+            m_status = text("", 0.f, -42.f, 0.34f, kText, m_content);
+            addButton("Count", 60.f, -74.f, menu_selector(ToolkitMenu::onCount), "GJ_button_01.png", 100);
+            addButton("Cancel", 170.f, -74.f, menu_selector(ToolkitMenu::onCancel), "GJ_button_04.png", 100);
+            text("Count shifts every click of the loaded replay", 0.f, -102.f, 0.27f, kMuted, m_content);
+            text("earlier / later to find its window in frames.", 0.f, -116.f, 0.27f, kMuted, m_content);
+            m_summary = text("", 0.f, -136.f, 0.3f, kText, m_content);
             m_summary->setAnchorPoint({0.f, 1.f});
-            text("1) Record  2) restart the level and clear it  3) Count", 0.f, -98.f, 0.28f, kMuted, m_content);
-            tick(0.f);
+            (void)cw;
         }
 
         void tick(float) {
             if (m_status) m_status->setString(counter::statusText().c_str());
             if (m_summary) m_summary->setString(counter::summaryText().c_str());
+            if (m_nameLabel) {
+                auto n = counter::currentName();
+                if (n.size() > 18) n = n.substr(0, 16) + "..";
+                m_nameLabel->setString(n.c_str());
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (m_radios[i]) m_radios[i]->toggle(static_cast<int>(counter::mode()) == i);
+            }
         }
 
-        void needLevel() { Notification::create("Open this from the pause menu inside a level", NotificationIcon::Warning, 2.f)->show(); }
-        void onRecord(CCObject*) { if (!PlayLayer::get()) return needLevel(); counter::armRecording(); }
-        void onStopRec(CCObject*) { counter::stopRecording(); }
+        // ---------- actions ----------
+        void onMode(CCObject* s) {
+            counter::setMode(static_cast<counter::Mode>(static_cast<CCNode*>(s)->getTag()));
+            tick(0.f);
+        }
+        void onPrev(CCObject*) { counter::selectReplay(-1); tick(0.f); }
+        void onNext(CCObject*) { counter::selectReplay(1); tick(0.f); }
+        void onNew(CCObject*) {
+            NamePrompt::create([](std::string const& n) { note(counter::newReplay(n)); });
+        }
+        void onSave(CCObject*) { note(counter::saveReplay()); }
+        void onLoad(CCObject*) { note(counter::loadReplay()); }
+        void onDelete(CCObject*) {
+            createQuickPopup("Delete replay", "Delete \"" + counter::currentName() + "\"?", "No", "Yes",
+                             [](FLAlertLayer*, bool yes) {
+                                 if (yes) note(counter::deleteReplay());
+                             });
+        }
+        void onFolder(CCObject*) { counter::openReplaysFolder(); }
         void onCount(CCObject*) {
-            if (!PlayLayer::get()) return needLevel();
+            if (!PlayLayer::get()) { note("Open this inside a level"); return; }
             counter::startCounting();
-            Notification::create("Resume the game - counting runs automatically", NotificationIcon::Info, 2.f)->show();
+            note("Close the menu and resume - counting runs automatically");
         }
         void onCancel(CCObject*) { counter::cancelCounting(); }
-        void onClear(CCObject*) { counter::clearAll(); }
     };
 }
 
 void open() {
+    if (g_open) return;
     ToolkitMenu::create();
 }
 
-CCMenuItemSpriteExtra* makeButton(CCObject* target, SEL_MenuHandler cb, float scale) {
-    auto spr = modSprite("kt_menu.png");
-    spr->setScale(scale);
-    auto btn = CCMenuItemSpriteExtra::create(spr, target, cb);
-    btn->setID("kimyy.gd-toolkit/toolkit-button");
-    return btn;
-}
+bool isOpen() { return g_open; }
 
 } // namespace kt::ui

@@ -164,11 +164,11 @@ namespace {
         });
         size_t j = 0;
         parsePts(lines[2], [&](float x, float y) {
-            if (j < s.clickPos.size()) s.clickPos[j] = {x, y};
+            if (j < s.clickPos.size()) s.clickPos[j] = CCPoint(x, y);
             ++j;
         });
         s.path.clear();
-        parsePts(lines[3], [](float x, float y) { s.path.push_back({x, y}); });
+        parsePts(lines[3], [](float x, float y) { s.path.push_back(CCPoint(x, y)); });
         buildCues();
         syncTrial();
         s.cursor = 0;

@@ -79,7 +79,7 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    float getModifiedDelta(float dt) {
+    double getModifiedDelta(float dt) {
         if (Cfg::get().tpsBypass) return kt::speed::modifiedDelta(this, dt);
         return GJBaseGameLayer::getModifiedDelta(dt);
     }

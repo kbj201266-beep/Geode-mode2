@@ -1,6 +1,8 @@
 // noclip, speedhack + physical TPS, practice music sync, layout mode.
 #include "Common.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -38,17 +40,16 @@ void apply() {
     }
 }
 
-// Physical TPS. NOTE: the exact contract of getModifiedDelta changes between GD versions - verify in game.
-// Here it returns a time slice made of whole ticks of length 1/tps and keeps the remainder for next frame.
-float modifiedDelta(GJBaseGameLayer* layer, float dt) {
-    static float acc = 0.f;
-    float tick = 1.f / std::clamp(Cfg::get().tps, 30.f, 2000.f);
-    float warp = std::max(layer->m_gameState.m_timeWarp, 0.01f);
-    tick *= std::min(warp, 1.f);
-    float total = dt + acc;
-    int steps = std::max(1, static_cast<int>(total / tick));
-    float used = steps * tick;
-    acc = std::max(0.f, total - used);
+// Physical TPS. Returns a time slice made of whole ticks of length 1/tps and keeps the remainder in the
+// game's own m_extraDelta. NOTE: verify in game with "Show TPS" - GD may still split the slice at 240 TPS.
+double modifiedDelta(GJBaseGameLayer* layer, float dt) {
+    double tick = 1.0 / std::clamp(static_cast<double>(Cfg::get().tps), 30.0, 2000.0);
+    double warp = std::clamp(static_cast<double>(layer->m_gameState.m_timeWarp), 0.01, 1.0);
+    tick *= warp;
+    double total = static_cast<double>(dt) + layer->m_extraDelta;
+    double steps = std::floor(total / tick);
+    double used = steps * tick;
+    layer->m_extraDelta = total - used;
     return used;
 }
 
@@ -67,12 +68,12 @@ float measuredTps() { return g_tps; }
 
 namespace kt::practice {
 // Native GD restarts the song from the level start after a checkpoint respawn. This seeks it to where the
-// player actually is: time at the player's x, plus the song start offset.
+// player actually is: the level time restored from the checkpoint, plus the song start offset.
 void sync(PlayLayer* pl) {
     if (!Cfg::get().practiceSync || !pl->m_isPracticeMode || !pl->m_player1) return;
-    float t = pl->timeForXPos(pl->m_player1->getPositionX());
-    float offset = pl->m_levelSettings ? pl->m_levelSettings->m_songOffset : 0.f;
-    unsigned ms = static_cast<unsigned>(std::max(0.f, (t + offset) * 1000.f));
+    double t = pl->m_gameState.m_levelTime;
+    double offset = pl->m_levelSettings ? pl->m_levelSettings->m_songOffset : 0.0;
+    unsigned ms = static_cast<unsigned>(std::max(0.0, (t + offset) * 1000.0));
     FMODAudioEngine::sharedEngine()->setMusicTimeMS(ms, true, 0);
 }
 }

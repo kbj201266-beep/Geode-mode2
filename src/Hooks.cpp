@@ -64,11 +64,13 @@ class $modify(KtPlayLayer, PlayLayer) {
 };
 
 class $modify(KtBaseLayer, GJBaseGameLayer) {
-    void processCommands(float dt) {
-        kt::speed::onStep();
-        kt::noclip::onStep();
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        if (!isHalfTick) {
+            kt::speed::onStep();
+            kt::noclip::onStep();
+        }
         kt::counter::beforeStep(this);
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -98,10 +100,10 @@ class $modify(KtPause, PauseLayer) {
             menu->addChild(btn);
             menu->updateLayout();
         } else {
-            auto menu = CCMenu::create();
-            menu->setPosition({36.f, 36.f});
-            menu->addChild(btn);
-            this->addChild(menu);
+            auto fallback = CCMenu::create();
+            fallback->setPosition({36.f, 36.f});
+            fallback->addChild(btn);
+            this->addChild(fallback);
         }
     }
     void onToolkit(CCObject*) { kt::ui::open(); }

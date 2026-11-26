@@ -2,7 +2,6 @@
 #include "Common.hpp"
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/GameObject.hpp>
 
@@ -25,6 +24,7 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::hitbox::update(this);
         kt::path::update(this);
         kt::counter::update(this);
+        kt::view::update(this);
         kt::hud::update(this);
     }
 
@@ -52,6 +52,7 @@ class $modify(KtPlayLayer, PlayLayer) {
 
     void loadFromCheckpoint(CheckpointObject* cp) {
         PlayLayer::loadFromCheckpoint(cp);
+        kt::counter::onReset(this);        // keeps the recording, cuts it back to the checkpoint frame
         kt::practice::sync(this);
     }
 
@@ -92,32 +93,11 @@ class $modify(KtGameObject, GameObject) {
     }
 };
 
-class $modify(KtPause, PauseLayer) {
-    void customSetup() {
-        PauseLayer::customSetup();
-        auto btn = kt::ui::makeButton(this, menu_selector(KtPause::onToolkit), 0.34f);
-        if (auto menu = this->getChildByID("right-button-menu")) {
-            menu->addChild(btn);
-            menu->updateLayout();
-        } else {
-            auto fallback = CCMenu::create();
-            fallback->setPosition({36.f, 36.f});
-            fallback->addChild(btn);
-            this->addChild(fallback);
-        }
-    }
-    void onToolkit(CCObject*) { kt::ui::open(); }
-};
-
+// The floating menu button is created once, on the first main menu, and then lives in every scene.
 class $modify(KtMenuLayer, MenuLayer) {
     bool init() {
         if (!MenuLayer::init()) return false;
-        auto btn = kt::ui::makeButton(this, menu_selector(KtMenuLayer::onToolkit), 0.30f);
-        if (auto menu = this->getChildByID("bottom-menu")) {
-            menu->addChild(btn);
-            menu->updateLayout();
-        }
+        kt::ui::spawnButton();
         return true;
     }
-    void onToolkit(CCObject*) { kt::ui::open(); }
 };

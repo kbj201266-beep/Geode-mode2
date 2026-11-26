@@ -1,0 +1,24 @@
+{
+    "geode": "5.10.1",
+    "gd": {
+        "win": "2.2091",
+        "android": "2.2091",
+        "mac": "2.2091"
+    },
+    "id": "kimyy.gd-toolkit",
+    "name": "GD Toolkit",
+    "version": "v0.1.0",
+    "developer": "kimyy",
+    "description": "Hitboxes, noclip, pathfinder, layout mode, practice music sync, speedhack, physical TPS and a window frame counter.",
+    "tags": ["gameplay", "utility"],
+    "dependencies": {
+        "geode.node-ids": {
+            "version": ">=v1.23.0",
+            "required": false
+        }
+    },
+    "resources": {
+        "sprites": ["resources/sprites/*.png"],
+        "files": ["resources/sfx/*.wav"]
+    }
+}

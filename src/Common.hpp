@@ -52,7 +52,12 @@ namespace counter {
         int frame = 0;
         int early = 0;
         int late = 0;
+        bool counted = false;
         int window() const { return early + late + 1; }
+    };
+    struct ClickView {
+        cocos2d::CCPoint pos;    // where the click happened in the level
+        int window;
     };
 
     enum class Mode { Disabled = 0, Record = 1, Playback = 2 };
@@ -75,6 +80,12 @@ namespace counter {
     std::string statusText();
     std::string summaryText();
 
+    // data for the on-level overlay
+    std::vector<Result> const& results();
+    std::vector<ClickView> clickViews();
+    std::vector<cocos2d::CCPoint> const& pathPoints();
+    int version();               // changes whenever the overlay must be redrawn
+
     // replay files (each returns a short message for the user)
     std::string currentName();
     void selectReplay(int delta);
@@ -83,6 +94,10 @@ namespace counter {
     std::string loadReplay();
     std::string deleteReplay();
     void openReplaysFolder();
+}
+
+namespace view {
+    void update(PlayLayer*);   // window counter overlay: path, click rings, window numbers, stats
 }
 
 namespace hud {

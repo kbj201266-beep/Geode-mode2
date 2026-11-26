@@ -4,10 +4,10 @@
 // X-macro tables: one line per setting, name + default. Saved under the same key.
 #define KT_BOOLS(X) \
     X(noclip, false) X(safeMode, true) X(speedhack, false) X(tpsBypass, false) X(showTps, false) \
-    X(hitboxes, false) X(playerHitbox, true) X(hitboxTrail, false) \
+    X(hitboxes, false) X(playerHitbox, true) X(hitboxTrail, false) X(hitborders, false) \
     X(pathfinder, false) \
     X(layoutMode, false) X(practiceSync, false) \
-    X(counterHud, true) X(counterSfx, true) X(ignoreInputs, true)
+    X(counterHud, true) X(counterSfx, true) X(ignoreInputs, true) X(counterOverlay, true)
 #define KT_FLOATS(X) \
     X(speed, 1.f) X(tps, 240.f) X(hitFill, 0.18f) X(hitBorder, 1.5f) \
     X(btnScale, 0.55f) X(btnX, 0.92f) X(btnY, 0.55f)

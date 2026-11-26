@@ -18,6 +18,12 @@ namespace {
                                                   "kt_tab_display.png", "kt_tab_counter.png"};
     constexpr char const* kTabNames[TabCount] = {"Cheats", "Hitbox", "Pathfinder", "Display", "Window counter"};
 
+    // Loads one of this mod's own sprites. Works whatever type expandSpriteName returns in this Geode version.
+    CCSprite* modSprite(char const* name) {
+        std::string path(Mod::get()->expandSpriteName(name));
+        return CCSprite::create(path.c_str());
+    }
+
     struct BoolRef { bool* v; bool restart; };
     struct SliderRef { float* f; int* i; float lo, hi; CCLabelBMFont* label; char const* fmt; };
 
@@ -73,7 +79,7 @@ namespace {
 
             // sidebar tab buttons
             for (int i = 0; i < TabCount; ++i) {
-                auto icon = CCSprite::create(Mod::get()->expandSpriteName(kTabIcons[i]));
+                auto icon = modSprite(kTabIcons[i]);
                 icon->setScale(0.34f);
                 auto btn = CCMenuItemSpriteExtra::create(icon, this, menu_selector(ToolkitMenu::onTab));
                 btn->setTag(i);
@@ -266,10 +272,10 @@ void open() {
 }
 
 CCMenuItemSpriteExtra* makeButton(CCObject* target, SEL_MenuHandler cb, float scale) {
-    auto spr = CCSprite::create(Mod::get()->expandSpriteName("kt_menu.png"));
+    auto spr = modSprite("kt_menu.png");
     spr->setScale(scale);
     auto btn = CCMenuItemSpriteExtra::create(spr, target, cb);
-    btn->setID("toolkit-button"_spr);
+    btn->setID("kimyy.gd-toolkit/toolkit-button");
     return btn;
 }
 

@@ -304,8 +304,8 @@ namespace {
                     addToggle("Safe mode (no submit)", c.safeMode);
                     addToggle("Speedhack", c.speedhack);
                     addSlider("Speed", &c.speed, nullptr, 0.1f, 5.f, "%.2fx");
-                    addToggle("Physical TPS", c.tpsBypass);
-                    addSlider("TPS", &c.tps, nullptr, 30.f, 1000.f, "%.0f");
+                    addToggle("Physical TPS (240+)", c.tpsBypass);
+                    addSlider("TPS", &c.tps, nullptr, 240.f, 1000.f, "%.0f");
                     addToggle("Show TPS", c.showTps);
                     break;
                 case Hitbox:

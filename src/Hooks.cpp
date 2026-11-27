@@ -3,7 +3,6 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/GameObject.hpp>
 
 using namespace geode::prelude;
 
@@ -56,6 +55,11 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::practice::sync(this);
     }
 
+    void onQuit() {
+        kt::counter::cancelCounting();     // never leave the game running at counting speed
+        PlayLayer::onQuit();
+    }
+
     void levelComplete() {
         if (kt::counter::onComplete(this)) return;
         // Safe Mode: anything that changes gameplay marks the run as a test so nothing is submitted.
@@ -83,13 +87,6 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         if (Cfg::get().tpsBypass) return kt::speed::modifiedDelta(this, dt);
         return GJBaseGameLayer::getModifiedDelta(dt);
-    }
-};
-
-class $modify(KtGameObject, GameObject) {
-    void setVisible(bool v) {
-        if (v && Cfg::get().layoutMode && kt::layout::isDeco(this)) v = false;
-        GameObject::setVisible(v);
     }
 };
 

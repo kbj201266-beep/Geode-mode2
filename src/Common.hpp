@@ -27,8 +27,9 @@ namespace noclip {
 }
 
 namespace speed {
-    void apply();              // speedhack time scale + music pitch
-    double modifiedDelta(GJBaseGameLayer*, float dt);  // physical TPS
+    float factor();            // total time scale: speedhack * counting speed (used by the scheduler hook)
+    void updatePitch();        // music pitch follows the speedhack
+    int planSteps(float dt, float& step);   // physical TPS: how many physics updates of `step` seconds to run
     void onStep();             // counts physics steps for the TPS readout
     float measuredTps();
 }
@@ -78,6 +79,7 @@ namespace counter {
     void setMode(Mode);
     void startCounting();
     void cancelCounting();
+    float speedFactor();         // 4 while counting, otherwise 1
     bool isRecording();
     bool isCounting();
     std::string statusText();

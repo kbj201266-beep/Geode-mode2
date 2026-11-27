@@ -129,6 +129,8 @@ namespace {
         CCLabelBMFont* m_status = nullptr;
         CCLabelBMFont* m_summary = nullptr;
         CCLabelBMFont* m_nameLabel = nullptr;
+        CCLabelBMFont* m_cardName = nullptr;
+        CCLabelBMFont* m_cardSub = nullptr;
         CCMenuItemToggler* m_radios[3] = {nullptr, nullptr, nullptr};
         int m_tab = Replay;
         float m_y = 0.f;
@@ -181,8 +183,13 @@ namespace {
             close->setPosition(origin + ccp(W - 16.f, H - 16.f));
             m_buttonMenu->addChild(close);
 
+            auto title = CCLabelBMFont::create("GD Toolkit", "goldFont.fnt");
+            title->setScale(0.6f);
+            title->setPosition(ccp(win.width / 2 + SIDE / 2, origin.y + H - 16.f));
+            m_mainLayer->addChild(title, 6);
+
             m_content = CCNode::create();
-            m_content->setPosition(origin + ccp(SIDE + 26.f, H - 20.f));
+            m_content->setPosition(origin + ccp(SIDE + 26.f, H - 40.f));
             m_mainLayer->addChild(m_content, 5);
 
             this->schedule(schedule_selector(ToolkitMenu::tick), 0.2f);
@@ -274,7 +281,7 @@ namespace {
             m_content->removeAllChildrenWithCleanup(true);
             m_bools.clear();
             m_sliders.clear();
-            m_status = m_summary = m_nameLabel = nullptr;
+            m_status = m_summary = m_nameLabel = m_cardName = m_cardSub = nullptr;
             for (auto& r : m_radios) r = nullptr;
             m_contentMenu = CCMenu::create();
             m_contentMenu->setPosition({0.f, 0.f});
@@ -284,8 +291,11 @@ namespace {
                 auto spr = static_cast<CCSprite*>(m_tabBtns[i]->getNormalImage());
                 spr->setColor(i == m_tab ? kAccent : kMuted);
             }
-            text(kTabNames[m_tab], 0.f, 0.f, 0.5f, kAccent, m_content);
-            m_y = -38.f;
+            auto tabTitle = CCLabelBMFont::create(kTabNames[m_tab], "goldFont.fnt");
+            tabTitle->setScale(0.55f);
+            tabTitle->setAnchorPoint({0.f, 0.5f});
+            m_content->addChild(tabTitle);
+            m_y = -30.f;
 
             auto& c = Cfg::get();
             switch (m_tab) {
@@ -373,21 +383,44 @@ namespace {
             addButton("Open Replays Folder", bx, m_y, menu_selector(ToolkitMenu::onFolder), tex, 230);
         }
 
+        // Window counter tab, laid out like Antic's Counter: replay card, Count / Stop, Save On Finish, Copy Info.
         void buildCounter() {
             float cw = contentW();
-            m_status = text("", 0.f, -42.f, 0.34f, kText, m_content);
-            addButton("Count", 60.f, -74.f, menu_selector(ToolkitMenu::onCount), "GJ_button_01.png", 100);
-            addButton("Cancel", 170.f, -74.f, menu_selector(ToolkitMenu::onCancel), "GJ_button_04.png", 100);
-            text("Count shifts every click of the loaded replay", 0.f, -102.f, 0.27f, kMuted, m_content);
-            text("earlier / later to find its window in frames.", 0.f, -116.f, 0.27f, kMuted, m_content);
-            m_summary = text("", 0.f, -136.f, 0.3f, kText, m_content);
+            auto card = CCScale9Sprite::create("square02b_001.png");
+            card->setContentSize({cw + 16.f, 40.f});
+            card->setColor({34, 39, 52});
+            card->setOpacity(255);
+            card->setPosition({cw / 2.f, m_y - 10.f});
+            m_content->addChild(card, 1);
+            m_cardName = text("", 0.f, m_y - 2.f, 0.4f, {255, 255, 255}, m_content);
+            m_cardSub = text("", 0.f, m_y - 19.f, 0.26f, kMuted, m_content);
+            m_cardName->setZOrder(3);
+            m_cardSub->setZOrder(3);
+            addButton("Change", cw - 26.f, m_y - 10.f, menu_selector(ToolkitMenu::onChange), "GJ_button_02.png", 56);
+            m_y -= 50.f;
+
+            addButton("Count Macro", cw * 0.25f, m_y, menu_selector(ToolkitMenu::onCount), "GJ_button_01.png", 150);
+            addButton("Stop", cw * 0.75f, m_y, menu_selector(ToolkitMenu::onCancel), "GJ_button_06.png", 150);
+            m_y -= 32.f;
+            addToggle("Save On Finish", Cfg::get().saveOnFinish);
+            m_y += 2.f;
+            addButton("Copy Info", cw / 2.f, m_y, menu_selector(ToolkitMenu::onCopy), "GJ_button_04.png", 316);
+            m_y -= 26.f;
+
+            m_status = text("", 0.f, m_y, 0.3f, kAccent, m_content);
+            m_summary = text("", 0.f, m_y - 12.f, 0.26f, kText, m_content);
             m_summary->setAnchorPoint({0.f, 1.f});
-            (void)cw;
         }
 
         void tick(float) {
             if (m_status) m_status->setString(counter::statusText().c_str());
             if (m_summary) m_summary->setString(counter::summaryText().c_str());
+            if (m_cardName) {
+                auto n = counter::currentName();
+                if (n.size() > 22) n = n.substr(0, 20) + "..";
+                m_cardName->setString(n.c_str());
+            }
+            if (m_cardSub) m_cardSub->setString(counter::macroInfo().c_str());
             if (m_nameLabel) {
                 auto n = counter::currentName();
                 if (n.size() > 18) n = n.substr(0, 16) + "..";
@@ -422,7 +455,21 @@ namespace {
             counter::startCounting();
             note("Close the menu and resume - counting runs automatically");
         }
-        void onCancel(CCObject*) { counter::cancelCounting(); }
+        void onCancel(CCObject*) {
+            if (counter::isCounting()) counter::cancelCounting();
+            else counter::setMode(counter::Mode::Disabled);      // also stops playback
+            tick(0.f);
+        }
+        void onChange(CCObject*) {
+            counter::selectReplay(1);
+            note(counter::loadReplay());
+            tick(0.f);
+        }
+        void onCopy(CCObject*) {
+            auto info = counter::infoText();
+            utils::clipboard::write(info.c_str());
+            note("Copied to clipboard");
+        }
     };
 }
 

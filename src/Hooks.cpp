@@ -28,12 +28,18 @@ class $modify(KtPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
+        // GD "kills" the player with an invisible anticheat spike at the start of every level. That is not a real
+        // death - it must always reach the game, and the counter must never treat it as a failed run.
+        if (obj == m_anticheatSpike) {
+            PlayLayer::destroyPlayer(player, obj);
+            return;
+        }
         if (kt::path::simulating()) {          // dummy player died: never touch the real one
             kt::path::onSimDeath();
             return;
         }
         if (kt::counter::onDeath(this)) return;
-        if (Cfg::get().noclip && obj != m_anticheatSpike) {
+        if (Cfg::get().noclip) {
             kt::noclip::onHit();
             return;
         }
@@ -98,7 +104,7 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
     }
 };
 
-// Speedhack: scale every frame's delta time. Also drives the 4x speed of the window counter.
+// Speedhack: scale every frame's delta time. Also drives the 8x speed of the window counter.
 class $modify(KtScheduler, CCScheduler) {
     void update(float dt) {
         kt::speed::updatePitch();

@@ -6,7 +6,6 @@
 //   green = pads, orbs, portals grown by half the outer box
 // All areas go into ONE grid: every cell gets exactly one color (red > green > blue), so areas never overlap
 // and outlines are drawn only where the color changes.
-// Hitborders and "Show hitboxes" are independent: turn both on to get the NaN look.
 //
 // Performance: objects are sorted by x once per level, so each frame only the objects near the player are visited.
 #include "Common.hpp"
@@ -115,6 +114,70 @@ namespace {
         return {r.origin.x - hx, r.origin.y - hy, r.size.width + 2 * hx, r.size.height + 2 * hy};
     }
 
+    // rotated by something that is not a multiple of 90 degrees (then its box is not axis aligned)
+    bool isTilted(GameObject* o) {
+        if (!o->m_orientedBox) return false;
+        float r = std::fmod(std::fabs(o->getRotation()), 90.f);
+        return r > 0.5f && r < 89.5f;
+    }
+
+    bool needsPolygon(GameObject* o) {
+        return o->m_objectType == GameObjectType::Slope || isTilted(o);
+    }
+
+    // The real hitbox shape: a triangle for slopes (45 and 22.5 degree), the rotated box for tilted objects,
+    // otherwise the plain rectangle.
+    std::vector<CCPoint> shapeOf(GameObject* o) {
+        if (o->m_objectType == GameObjectType::Slope) {
+            auto r = objRect(o);
+            CCPoint bl(r.getMinX(), r.getMinY()), br(r.getMaxX(), r.getMinY());
+            CCPoint tl(r.getMinX(), r.getMaxY()), tr(r.getMaxX(), r.getMaxY());
+            bool floor = o->slopeFloorTop();      // walkable surface on top (a floor slope, not a ceiling one)
+            bool wallLeft = o->slopeWallLeft();   // the vertical side is on the left
+            if (floor) return wallLeft ? std::vector<CCPoint>{bl, br, tl} : std::vector<CCPoint>{bl, br, tr};
+            return wallLeft ? std::vector<CCPoint>{tl, tr, bl} : std::vector<CCPoint>{tl, tr, br};
+        }
+        if (isTilted(o)) {
+            auto& c = o->m_orientedBox->m_corners;
+            return std::vector<CCPoint>(c.begin(), c.end());
+        }
+        return corners(o->getObjectRect());
+    }
+
+    // shape grown by a box of half size (hx, hy) = convex hull of the shape moved to every box corner
+    std::vector<CCPoint> grownHull(std::vector<CCPoint> const& shape, float hx, float hy) {
+        std::vector<CCPoint> pts;
+        for (auto& p : shape) {
+            pts.push_back(CCPoint(p.x - hx, p.y - hy));
+            pts.push_back(CCPoint(p.x + hx, p.y - hy));
+            pts.push_back(CCPoint(p.x + hx, p.y + hy));
+            pts.push_back(CCPoint(p.x - hx, p.y + hy));
+        }
+        std::sort(pts.begin(), pts.end(), [](CCPoint const& a, CCPoint const& b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y);
+        });
+        auto cross = [](CCPoint const& o, CCPoint const& a, CCPoint const& b) {
+            return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        };
+        std::vector<CCPoint> h(pts.size() * 2);
+        size_t k = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            while (k >= 2 && cross(h[k - 2], h[k - 1], pts[i]) <= 0) --k;
+            h[k++] = pts[i];
+        }
+        for (size_t i = pts.size() - 1, t = k + 1; i > 0; --i) {
+            while (k >= t && cross(h[k - 2], h[k - 1], pts[i - 1]) <= 0) --k;
+            h[k++] = pts[i - 1];
+        }
+        h.resize(k > 0 ? k - 1 : 0);
+        return h;
+    }
+
+    void fillPoly(CCDrawNode* n, std::vector<CCPoint> const& v, ccColor4F fill, float bw, ccColor4F border) {
+        if (v.size() < 3) return;
+        n->drawPolygon(const_cast<CCPoint*>(v.data()), static_cast<unsigned>(v.size()), fill, bw, border);
+    }
+
     struct Area {
         CCRect r;
         uint8_t level;      // 1 blue, 2 green, 3 red (higher wins)
@@ -221,12 +284,30 @@ namespace {
         float ox = outer.size.width / 2, oy = outer.size.height / 2;
         float ix = inner.size.width / 2, iy = inner.size.height / 2;
 
+        // Straight boxes go into the merged grid. Slopes and tilted objects are not rectangles, so they get
+        // their exact grown shape as a polygon instead (blue ones under the grid, red/green ones on top).
         std::vector<Area> areas;
+        std::vector<std::vector<CCPoint>> blueP, greenP, redP;
         float range = CCDirector::get()->getWinSize().width * 1.2f;
         float px = pl->m_player1->getPositionX();
         forNear(px - range, px + range, [&](GameObject* obj) {
+            auto kind = kindOf(obj);
+            if (kind == Kind::Solid && obj->m_objectType == GameObjectType::Slope && obj->m_slopeIsHazard) kind = Kind::Hazard;
+            if (needsPolygon(obj)) {
+                auto shape = shapeOf(obj);
+                switch (kind) {
+                    case Kind::Hazard: redP.push_back(grownHull(shape, ox, oy)); break;
+                    case Kind::Solid:
+                        blueP.push_back(grownHull(shape, ox, oy));
+                        redP.push_back(grownHull(shape, ix, iy));
+                        break;
+                    case Kind::Special: greenP.push_back(grownHull(shape, ox, oy)); break;
+                    default: break;
+                }
+                return;
+            }
             auto r = objRect(obj);
-            switch (kindOf(obj)) {
+            switch (kind) {
                 case Kind::Hazard: areas.push_back({grow(r, ox, oy), 3}); break;
                 case Kind::Solid:
                     areas.push_back({grow(r, ox, oy), 1});
@@ -237,8 +318,13 @@ namespace {
             }
         });
 
+        float bw = Cfg::get().hitBorder;
         float fa = std::clamp(Cfg::get().hitFill * 3.f, 0.15f, 0.85f);   // fill opacity slider also drives this view
-        drawAreas(n, areas, Cfg::get().hitBorder, fa);
+        ccColor4F blue{0.05f, 0.12f, 0.95f, 1.f};
+        for (auto& p : blueP) fillPoly(n, p, blue, 0.f, blue);
+        drawAreas(n, areas, bw, fa);
+        for (auto& p : greenP) fillPoly(n, p, {0.1f, 0.75f, 0.2f, fa}, bw / 2.f, {0.2f, 1.f, 0.3f, 1.f});
+        for (auto& p : redP) fillPoly(n, p, {0.55f, 0.05f, 0.05f, fa}, bw / 2.f, {1.f, 0.1f, 0.1f, 1.f});
 
         pushCenter(g_center1, pl->m_player1);
         drawCenter(n, g_center1, pl->m_player1);
@@ -256,8 +342,11 @@ namespace {
             case Kind::Skip: return;
             default: col = {80, 255, 120}; break;      // portals, pads, orbs, coins...
         }
-        // Rotated objects carry an oriented box; everything else is an axis aligned rect.
-        if (o->m_orientedBox) {
+        // Slopes are triangles, rotated objects use their oriented box, everything else is an axis aligned rect.
+        if (o->m_objectType == GameObjectType::Slope) {
+            if (o->m_slopeIsHazard) col = {255, 60, 60};
+            poly(n, shapeOf(o), col, true);
+        } else if (o->m_orientedBox) {
             auto& c = o->m_orientedBox->m_corners;   // std::array<CCPoint, 4> in 2.2091
             poly(n, std::vector<CCPoint>(c.begin(), c.end()), col, true);
         } else {

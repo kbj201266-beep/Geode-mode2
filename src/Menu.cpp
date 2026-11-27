@@ -125,7 +125,10 @@ namespace {
             CC_SAFE_DELETE(r);
             return nullptr;
         }
-        ~ToolkitMenu() { g_open = false; }
+        ~ToolkitMenu() {
+            g_open = false;
+            Cfg::get().save();      // slider changes are saved however the menu gets closed
+        }
 
     private:
         static constexpr float W = 460.f, H = 300.f, SIDE = 64.f;
@@ -440,6 +443,7 @@ namespace {
             addButton("Stop", cw * 0.75f, m_y, menu_selector(ToolkitMenu::onCancel), "GJ_button_06.png", 150);
             m_y -= 32.f;
             addToggle("Save On Finish", Cfg::get().saveOnFinish);
+            addToggle("Show Results List", Cfg::get().counterList);
             m_y += 2.f;
             addButton("Copy Info", cw / 2.f, m_y, menu_selector(ToolkitMenu::onCopy), "GJ_button_04.png", 316);
             m_y -= 26.f;

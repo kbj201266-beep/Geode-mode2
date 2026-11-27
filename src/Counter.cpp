@@ -7,6 +7,7 @@
 //  - Playback: the replay is played back by the mod. "Ignore Inputs" blocks your own clicks meanwhile.
 //  - Count:    1) one normal run of the replay from the level start. It records the player's path, where every
 //                 click happened, and saves a checkpoint a few frames before every click.
+//                 If the replay dies somewhere, the clicks before that point are still counted.
 //              2) for every click: load the checkpoint before it, shift the click earlier / later by 1,2,3...
 //                 frames, and check whether the player survives until the NEXT click. No level restarts, so
 //                 the attempt counter stays at 1 and it is fast. window = early + late + 1.
@@ -26,7 +27,7 @@ namespace kt::counter {
 
 namespace {
     constexpr int kMaxSide = 12;         // search at most 12 frames each way -> window up to 25f
-    constexpr float kCountSpeed = 4.f;   // replay speed while counting
+    constexpr float kCountSpeed = 8.f;   // replay speed while counting
     constexpr float kNoPos = -1e9f;
     constexpr size_t kMaxLines = 40;     // trial lines kept on screen for the current click
 
@@ -67,6 +68,8 @@ namespace {
         size_t cursor = 0;
         int checkFrame = 0;
         int k = 0, dir = 0, off = 0;
+        int limit = 0;                       // clicks that can be counted (all, or those before the replay dies)
+        int deathFrame = 0;
         std::chrono::steady_clock::time_point t0;
         std::string msg = "Idle";
     } s;
@@ -258,7 +261,7 @@ namespace {
     }
 
     void stop(std::string const& why) {
-        s.phase = Phase::Idle;       // the 4x counting speed ends with the phase (see speedFactor)
+        s.phase = Phase::Idle;       // the counting speed ends with the phase (see speedFactor)
         s.needReset = false;
         s.msg = why;
         s.lines.clear();
@@ -271,12 +274,12 @@ namespace {
     void complete() {
         buildCues();
         if (Cfg::get().saveOnFinish) autosave();
-        stop("Done - " + std::to_string(s.results.size()) + " clicks counted");
+        stop("Done - " + std::to_string(s.limit) + " clicks counted");
         FMODAudioEngine::sharedEngine()->playEffect(std::string("ding_9.wav"_spr), 1.f, 1.f, 1.f);
     }
 
     void scheduleNext() {
-        while (s.k < static_cast<int>(s.clicks.size())) {
+        while (s.k < s.limit) {
             if (makeTrial(s.k, s.off)) { s.needReset = true; return; }
             nextSide();     // impossible shift (would reorder inputs) counts as a fail
         }
@@ -285,7 +288,13 @@ namespace {
 
     void finish(bool ok) {
         if (s.phase == Phase::Baseline) {
-            if (!ok) { stop("Replay does not clear the level - record it again"); return; }
+            if (!ok) {
+                // The replay dies somewhere: still count every click whose next click comes before that point.
+                int usable = 0;
+                while (usable < static_cast<int>(s.clicks.size()) && s.clicks[usable].checkFrame < s.deathFrame) ++usable;
+                if (usable == 0) { stop("The replay dies before its first click - record a longer run"); return; }
+                s.limit = usable;
+            }
             s.phase = Phase::Trial;
             s.k = 0; s.dir = 0; s.off = -1;
         } else {
@@ -385,8 +394,9 @@ void beforeStep(GJBaseGameLayer* l) {
     }
 }
 
-bool onDeath(PlayLayer*) {
+bool onDeath(PlayLayer* pl) {
     if (!active()) return false;
+    if (!s.trialDead) s.deathFrame = frameOf(pl);
     s.trialDead = true;
     return true;
 }
@@ -477,6 +487,8 @@ void startCounting() {
     s.lines.clear();
     s.trialPath.clear();
     s.lastPathFrame = -1;
+    s.limit = static_cast<int>(s.clicks.size());
+    s.deathFrame = 0;
     s.phase = Phase::Baseline;
     makeTrial(-1, 0);
     s.needReset = true;
@@ -494,7 +506,7 @@ bool isCounting() { return active(); }
 
 std::string countingText() {
     if (!active()) return "";
-    int n = static_cast<int>(s.clicks.size());
+    int n = s.phase == Phase::Baseline ? static_cast<int>(s.clicks.size()) : s.limit;
     if (s.phase == Phase::Baseline) return "Preparing.. 0/" + std::to_string(n) + "\nETA ~?";
     float el = std::chrono::duration<float>(std::chrono::steady_clock::now() - s.t0).count();
     std::string e = s.k > 0 ? eta(el / s.k * (n - s.k)) : std::string("~?");

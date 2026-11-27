@@ -6,6 +6,7 @@
 //   green = pads, orbs, portals grown by half the outer box
 // All areas go into ONE grid: every cell gets exactly one color (red > green > blue), so areas never overlap
 // and outlines are drawn only where the color changes.
+// Hitborders and "Show hitboxes" are independent: turn both on to get the NaN look.
 //
 // Performance: objects are sorted by x once per level, so each frame only the objects near the player are visited.
 #include "Common.hpp"
@@ -155,18 +156,32 @@ namespace {
                               {0.55f, 0.05f, 0.05f, fillA}};          // red
         ccColor4F borders[4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0.2f, 1.f, 0.3f, 1.f}, {1.f, 0.1f, 0.1f, 1.f}};
 
-        // fill: one quad per horizontal run of equal cells
+        // fill: cells become as few rectangles as possible (a row run is stacked onto the run above it when
+        // both have the same x range and color), so no two quads share an edge or overlap.
+        struct Open { int s, e, j0; uint8_t v; };
+        std::vector<Open> open;
+        auto flush = [&](Open const& o, int jEnd) {
+            CCPoint q[4] = {{xs[o.s], ys[o.j0]}, {xs[o.e], ys[o.j0]}, {xs[o.e], ys[jEnd]}, {xs[o.s], ys[jEnd]}};
+            n->drawPolygon(q, 4, fills[o.v], 0.f, fills[o.v]);
+        };
         for (int j = 0; j < ny; ++j) {
+            std::vector<Open> next;
             int i = 0;
             while (i < nx) {
                 uint8_t v = at(i, j);
                 int s = i;
                 while (i < nx && at(i, j) == v) ++i;
                 if (!v) continue;
-                CCPoint q[4] = {{xs[s], ys[j]}, {xs[i], ys[j]}, {xs[i], ys[j + 1]}, {xs[s], ys[j + 1]}};
-                n->drawPolygon(q, 4, fills[v], 0.f, fills[v]);
+                Open cur{s, i, j, v};
+                for (auto& o : open) {
+                    if (o.j0 >= 0 && o.s == s && o.e == i && o.v == v) { cur.j0 = o.j0; o.j0 = -1; break; }
+                }
+                next.push_back(cur);
             }
+            for (auto& o : open) if (o.j0 >= 0) flush(o, j);
+            open = std::move(next);
         }
+        for (auto& o : open) flush(o, ny);
 
         // outline: only on the side of the higher level, so outlines never overlap other areas
         if (bw <= 0.f) return;
@@ -289,10 +304,9 @@ void update(PlayLayer* pl) {
     if (path::simulating() || !pl->m_player1) return;
     ensureCache(pl);
 
-    if (c.hitborders) {          // NaN style view replaces the normal hitboxes
-        drawHitborders(node, pl);
-        return;
-    }
+    // Hitborders and hitboxes are independent: turn both on to get the NaN look (merged danger area underneath,
+    // the real object hitboxes drawn on top). Anything drawn later ends up above what was drawn before.
+    if (c.hitborders) drawHitborders(node, pl);
 
     if (c.hitboxTrail) {
         push(g_trail1, pl->m_player1);

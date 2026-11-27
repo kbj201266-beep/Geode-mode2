@@ -1,6 +1,6 @@
 // Window counter overlay (same look as Antic's Counter / NaN Counter):
 //  - while counting: every trial's path (white = survived, red = died) and "Counting.. 10/26 / ETA ~51s"
-//  - after counting: the run's path, a ring where every click happened with its window next to it,
+//  - the run's path, a ring where every click happened with its window next to it,
 //    bucket counts on the left (0-1, 2, 3, 4, 5-6, 7-8, 9-12, 13-16, 17-24), counted % and average bottom left.
 // Performance: the level overlay is split into chunks along x; only chunks near the player are visible.
 #include "Common.hpp"
@@ -65,7 +65,7 @@ namespace {
         return l;
     }
 
-    // ---- the finished overlay, in chunks ----
+    // ---- the level overlay, in chunks ----
     struct Chunk {
         CCNode* node;
         CCDrawNode* draw;
@@ -124,8 +124,6 @@ namespace {
                 if (w >= kBuckets[b].lo && w <= kBuckets[b].hi) { ++counts[b]; break; }
             }
         }
-        if (counted == 0) return;
-
         auto root = CCNode::create();
         root->setID(kStatsId);
         pl->m_uiLayer->addChild(root, 90);
@@ -139,9 +137,9 @@ namespace {
         }
 
         char buf[48];
-        std::snprintf(buf, sizeof buf, "%.2f%%", 100.f * counted / total);
+        std::snprintf(buf, sizeof buf, "%.2f%%", total ? 100.f * counted / total : 0.f);
         label(root, buf, {6.f, 26.f}, 0.4f, {255, 255, 255}, {0.f, 0.5f});
-        std::snprintf(buf, sizeof buf, "%.2f", sum / counted);
+        std::snprintf(buf, sizeof buf, "%.2f", counted ? sum / counted : 0.f);
         label(root, buf, {6.f, 10.f}, 0.4f, {255, 255, 255}, {0.f, 0.5f});
     }
 
@@ -180,11 +178,13 @@ namespace {
     }
 }
 
+// The bucket list (0-1:, 2:, 3: ...) and the rings are always on screen while "Counter overlay" is on -
+// before counting (all zeros), while counting (filled in click by click) and after.
 void update(PlayLayer* pl) {
     bool counting = counter::isCounting();
     updateCounting(pl, counting && Cfg::get().counterOverlay);
 
-    bool show = Cfg::get().counterOverlay && !counting;
+    bool show = Cfg::get().counterOverlay;
     auto world = pl->m_objectLayer->getChildByID(kWorldId);
     auto stats = pl->m_uiLayer->getChildByID(kStatsId);
     if (!show) {

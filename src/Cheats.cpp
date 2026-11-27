@@ -1,4 +1,4 @@
-// noclip, speedhack + physical TPS, practice music sync, layout mode.
+// noclip, speedhack + physical TPS, practice music sync, layout mode, ultra low detail mode.
 #include "Common.hpp"
 #include <algorithm>
 #include <chrono>
@@ -35,14 +35,22 @@ namespace {
         auto& c = Cfg::get();
         return c.speedhack ? std::clamp(c.speed, 0.01f, 10.f) : 1.f;
     }
+
+    // The speedhack only acts while a level is really being played: not in menus, not while paused,
+    // not on the level-complete screen.
+    float levelSpeed() {
+        auto pl = PlayLayer::get();
+        if (!pl || pl->m_isPaused || pl->m_hasCompletedLevel || pl->m_levelEndAnimationStarted) return 1.f;
+        return userSpeed();
+    }
 }
 
 // Speedhack = every frame's delta time is multiplied (CCScheduler::update hook in Hooks.cpp). Reapplied every
-// frame, so it keeps working after GD resets things, in menus too, and while the counting speed is on.
-float factor() { return userSpeed() * counter::speedFactor(); }
+// frame, so it keeps working after GD resets things, and combines with the counting speed.
+float factor() { return levelSpeed() * counter::speedFactor(); }
 
 void updatePitch() {
-    float p = userSpeed();
+    float p = levelSpeed();
     bool need = p != 1.f || g_lastPitch != 1.f;     // songs create new channels, so keep reapplying while != 1
     g_lastPitch = p;
     if (!need) return;
@@ -90,9 +98,10 @@ void sync(PlayLayer* pl) {
 }
 }
 
-// Layout mode: background and ground stay as they are, decoration is hidden, and every object with a hitbox
-// is painted white (GD's built-in "White" color channel 1011). Done once per reset instead of hooking every
-// setVisible call, which is what made it lag before. Turning it off restores the original state.
+// Layout mode:          background and ground stay, decoration hidden, every object with a hitbox painted white.
+// Ultra low detail mode: decoration hidden, all glow removed, the middle background layer hidden - the level
+//                        keeps its colors but draws far less, so it stops lagging.
+// Applied once per level reset (no per-frame hooks). Turning a mode off restores the original state.
 namespace kt::layout {
 namespace {
     constexpr int kWhite = 1011;
@@ -100,6 +109,7 @@ namespace {
         bool hide;
         int base;
         int detail;
+        bool glow;
     };
     PlayLayer* g_owner = nullptr;
     bool g_applied = false;
@@ -126,35 +136,43 @@ void apply(PlayLayer* pl) {
         g_orig.clear();
         g_applied = false;
     }
-    bool on = Cfg::get().layoutMode;
-    if (!on && !g_applied) return;
+    auto& c = Cfg::get();
+    bool hideDeco = c.layoutMode || c.ultraLow;
+    bool white = c.layoutMode;
+    bool noGlow = c.layoutMode || c.ultraLow;
+    bool any = hideDeco || white || noGlow;
+    if (pl->m_middleground) pl->m_middleground->setVisible(!c.ultraLow);
+    if (!any && !g_applied) return;
     if (!pl->m_objects) return;
 
     for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
         if (!obj) continue;
         bool deco = isDeco(obj), solid = hasHitbox(obj);
         if (!deco && !solid) continue;
-        if (on) {
-            if (!g_orig.count(obj)) {
-                g_orig[obj] = {obj->m_isHide, obj->m_baseColor ? obj->m_baseColor->m_colorID : 0,
-                               obj->m_detailColor ? obj->m_detailColor->m_colorID : 0};
-            }
-            if (deco) {
-                obj->m_isHide = true;
-                obj->setVisible(false);
-            } else {
-                if (obj->m_baseColor) obj->m_baseColor->m_colorID = kWhite;
-                if (obj->m_detailColor) obj->m_detailColor->m_colorID = kWhite;
-            }
-        } else {
-            auto it = g_orig.find(obj);
-            if (it == g_orig.end()) continue;
-            obj->m_isHide = it->second.hide;
-            if (obj->m_baseColor) obj->m_baseColor->m_colorID = it->second.base;
-            if (obj->m_detailColor) obj->m_detailColor->m_colorID = it->second.detail;
+        if (!g_orig.count(obj)) {
+            if (!any) continue;
+            g_orig[obj] = {obj->m_isHide, obj->m_baseColor ? obj->m_baseColor->m_colorID : 0,
+                           obj->m_detailColor ? obj->m_detailColor->m_colorID : 0,
+                           obj->m_glowSprite ? obj->m_glowSprite->isVisible() : false};
         }
+        auto& o = g_orig[obj];
+        // back to the original first, then apply whatever is on now
+        obj->m_isHide = o.hide;
+        if (obj->m_baseColor) obj->m_baseColor->m_colorID = o.base;
+        if (obj->m_detailColor) obj->m_detailColor->m_colorID = o.detail;
+        if (obj->m_glowSprite) obj->m_glowSprite->setVisible(o.glow);
+
+        if (hideDeco && deco) {
+            obj->m_isHide = true;
+            obj->setVisible(false);
+        }
+        if (white && solid) {
+            if (obj->m_baseColor) obj->m_baseColor->m_colorID = kWhite;
+            if (obj->m_detailColor) obj->m_detailColor->m_colorID = kWhite;
+        }
+        if (noGlow && obj->m_glowSprite) obj->m_glowSprite->setVisible(false);
     }
-    if (!on) g_orig.clear();
-    g_applied = on;
+    if (!any) g_orig.clear();
+    g_applied = any;
 }
 }

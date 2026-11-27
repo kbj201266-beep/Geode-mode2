@@ -6,7 +6,7 @@
     X(noclip, false) X(safeMode, true) X(speedhack, false) X(tpsBypass, false) X(showTps, false) \
     X(hitboxes, false) X(playerHitbox, true) X(hitboxTrail, false) X(hitborders, false) \
     X(pathfinder, false) \
-    X(layoutMode, false) X(practiceSync, false) \
+    X(layoutMode, false) X(ultraLow, false) X(practiceSync, false) \
     X(counterHud, true) X(counterSfx, true) X(ignoreInputs, true) X(counterOverlay, true) X(saveOnFinish, true) X(counterList, false)
 #define KT_FLOATS(X) \
     X(speed, 1.f) X(tps, 240.f) X(hitFill, 0.18f) X(hitBorder, 1.5f) \

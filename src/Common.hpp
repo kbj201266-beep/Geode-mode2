@@ -38,8 +38,7 @@ namespace practice {
 }
 
 namespace layout {
-    bool isDeco(GameObject*);
-    void apply(PlayLayer*);
+    void apply(PlayLayer*);    // hide decoration, paint hitbox objects white (or undo it)
 }
 
 namespace counter {
@@ -58,6 +57,10 @@ namespace counter {
     struct ClickView {
         cocos2d::CCPoint pos;    // where the click happened in the level
         int window;
+    };
+    struct TrialLine {
+        std::vector<cocos2d::CCPoint> pts;   // path of one counting trial
+        bool ok;                              // survived (white) or died (red)
     };
 
     enum class Mode { Disabled = 0, Record = 1, Playback = 2 };
@@ -79,11 +82,16 @@ namespace counter {
     bool isCounting();
     std::string statusText();
     std::string summaryText();
+    std::string countingText();  // "Counting.. 10/26\nETA ~51s"
+    std::string macroInfo();     // "Loaded  -  30 inputs at 240 TPS"
+    std::string infoText();      // everything, for Copy Info
 
     // data for the on-level overlay
     std::vector<Result> const& results();
     std::vector<ClickView> clickViews();
     std::vector<cocos2d::CCPoint> const& pathPoints();
+    std::vector<TrialLine> const& trialLines();
+    std::vector<cocos2d::CCPoint> const& currentTrialPath();
     int version();               // changes whenever the overlay must be redrawn
 
     // replay files (each returns a short message for the user)

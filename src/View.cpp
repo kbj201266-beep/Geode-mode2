@@ -178,30 +178,36 @@ namespace {
     }
 }
 
-// The bucket list (0-1:, 2:, 3: ...) and the rings are always on screen while "Counter overlay" is on -
-// before counting (all zeros), while counting (filled in click by click) and after.
+// Two separate switches:
+//  - "Counter overlay" (Display tab): the path, the rings and the window numbers in the level
+//  - "Show Results List" (Window counter tab): the 0-1:, 2:, 3: ... list on the left
 void update(PlayLayer* pl) {
+    auto& c = Cfg::get();
     bool counting = counter::isCounting();
-    updateCounting(pl, counting && Cfg::get().counterOverlay);
+    updateCounting(pl, counting && c.counterOverlay);
 
-    bool show = Cfg::get().counterOverlay;
     auto world = pl->m_objectLayer->getChildByID(kWorldId);
     auto stats = pl->m_uiLayer->getChildByID(kStatsId);
-    if (!show) {
+    bool changed = g_layer != pl || g_version != counter::version();
+    g_layer = pl;
+    g_version = counter::version();
+
+    if (!c.counterOverlay) {
         if (world) world->removeFromParentAndCleanup(true);
-        if (stats) stats->removeFromParentAndCleanup(true);
-        g_version = -1;
-        return;
-    }
-    if (!world || g_layer != pl || g_version != counter::version()) {
+        world = nullptr;
+    } else if (!world || changed) {
         if (world) world->removeFromParentAndCleanup(true);
-        if (stats) stats->removeFromParentAndCleanup(true);
-        g_layer = pl;
-        g_version = counter::version();
         buildWorld(pl);
-        buildStats(pl);
         world = pl->m_objectLayer->getChildByID(kWorldId);
     }
+
+    if (!c.counterList) {
+        if (stats) stats->removeFromParentAndCleanup(true);
+    } else if (!stats || changed) {
+        if (stats) stats->removeFromParentAndCleanup(true);
+        buildStats(pl);
+    }
+
     if (world) cullWorld(pl, world);
 }
 

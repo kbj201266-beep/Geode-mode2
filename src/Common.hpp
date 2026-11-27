@@ -15,7 +15,7 @@ namespace hitbox {
 namespace path {
     void update(PlayLayer*);   // pathfinder: simulates a dummy player forward
     bool simulating();         // true while the dummy is being stepped
-    void onSimDeath();
+    void onSimDeath(GameObject* obj);
     void reset();
 }
 
@@ -79,9 +79,10 @@ namespace counter {
     void setMode(Mode);
     void startCounting();
     void cancelCounting();
-    float speedFactor();         // 4 while counting, otherwise 1
+    float speedFactor();         // 8 while counting, otherwise 1
     bool isRecording();
     bool isCounting();
+    bool botPlaying();           // Playback mode with a replay: the mod is clicking, not the player
     std::string statusText();
     std::string summaryText();
     std::string countingText();  // "Counting.. 10/26\nETA ~51s"

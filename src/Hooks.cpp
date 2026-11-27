@@ -3,6 +3,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
 
@@ -19,7 +20,6 @@ class $modify(KtPlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        kt::speed::apply();
         kt::hitbox::update(this);
         kt::path::update(this);
         kt::counter::update(this);
@@ -84,9 +84,25 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    double getModifiedDelta(float dt) {
-        if (Cfg::get().tpsBypass) return kt::speed::modifiedDelta(this, dt);
-        return GJBaseGameLayer::getModifiedDelta(dt);
+    // Physical TPS: run the game's own update() several times with dt = 1 / TPS (see Cheats.cpp).
+    void update(float dt) {
+        auto& c = Cfg::get();
+        auto pl = PlayLayer::get();
+        if (!c.tpsBypass || c.tps < 241.f || !pl || static_cast<GJBaseGameLayer*>(pl) != this) {
+            GJBaseGameLayer::update(dt);
+            return;
+        }
+        float step = 0.f;
+        int n = kt::speed::planSteps(dt, step);
+        for (int i = 0; i < n; ++i) GJBaseGameLayer::update(step);
+    }
+};
+
+// Speedhack: scale every frame's delta time. Also drives the 4x speed of the window counter.
+class $modify(KtScheduler, CCScheduler) {
+    void update(float dt) {
+        kt::speed::updatePitch();
+        CCScheduler::update(dt * kt::speed::factor());
     }
 };
 

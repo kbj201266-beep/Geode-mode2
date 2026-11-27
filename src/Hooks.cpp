@@ -35,7 +35,7 @@ class $modify(KtPlayLayer, PlayLayer) {
             return;
         }
         if (kt::path::simulating()) {          // dummy player died: never touch the real one
-            kt::path::onSimDeath();
+            kt::path::onSimDeath(obj);
             return;
         }
         if (kt::counter::onDeath(this)) return;
@@ -70,6 +70,8 @@ class $modify(KtPlayLayer, PlayLayer) {
         if (kt::counter::onComplete(this)) return;
         // Safe Mode: anything that changes gameplay marks the run as a test so nothing is submitted.
         if (Cfg::get().safeMode && Cfg::get().cheating()) m_isTestMode = true;
+        // A level finished by replay playback was not played by you: never save or submit it.
+        if (kt::counter::botPlaying()) m_isTestMode = true;
         PlayLayer::levelComplete();
     }
 };

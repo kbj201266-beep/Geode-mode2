@@ -81,6 +81,15 @@ namespace {
 
         void ccTouchCancelled(CCTouch*, CCEvent*) override { m_down = false; }
 
+        // Hidden while a level is being played (normal or practice) and while the menu is open.
+        // In a level it shows up again as soon as you pause.
+        void tick(float) {
+            bool hide = isOpen();
+            if (auto pl = PlayLayer::get()) hide = hide || !pl->m_isPaused || counter::isCounting();
+            if (hide && m_down) m_down = false;
+            this->setVisible(!hide);
+        }
+
     private:
         CCSprite* m_icon = nullptr;
         bool m_down = false, m_drag = false;
@@ -94,6 +103,7 @@ namespace {
             applyScale();
             applyPos();
             this->setID(kId);
+            this->schedule(schedule_selector(FloatButton::tick), 0.1f);
             return true;
         }
     };

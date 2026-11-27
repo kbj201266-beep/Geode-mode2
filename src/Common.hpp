@@ -39,7 +39,7 @@ namespace practice {
 }
 
 namespace layout {
-    void apply(PlayLayer*);    // hide decoration, paint hitbox objects white (or undo it)
+    void apply(PlayLayer*);    // layout mode / ultra low detail mode (or undo them)
 }
 
 namespace counter {
@@ -49,15 +49,22 @@ namespace counter {
         bool p1;
     };
     struct Result {
-        int frame = 0;
+        int frame = 0;           // the press
         int early = 0;
         int late = 0;
         bool counted = false;
+        int relFrame = -1;       // its release (-1 = held to the end)
+        int relEarly = 0;
+        int relLate = 0;
+        bool relCounted = false;
         int window() const { return early + late + 1; }
+        int relWindow() const { return relEarly + relLate + 1; }
     };
-    struct ClickView {
-        cocos2d::CCPoint pos;    // where the click happened in the level
+    struct Cue {                 // one counted press or release, as shown in the level
+        int frame;
         int window;
+        bool release;
+        cocos2d::CCPoint pos;    // where it happened in the level
     };
     struct TrialLine {
         std::vector<cocos2d::CCPoint> pts;   // path of one counting trial
@@ -91,7 +98,11 @@ namespace counter {
 
     // data for the on-level overlay
     std::vector<Result> const& results();
-    std::vector<ClickView> clickViews();
+    std::vector<Cue> const& cues();          // finished windows in frame order (shown one by one while playing)
+    std::vector<Cue> countedCues();          // everything counted so far (grows while counting)
+    size_t cueCursor();                      // how many cues the player has reached in this attempt
+    int lastCue();                           // index in cues() of the last reached one, -1 = none
+    bool baselineRunning();                  // the first (path recording) run of a count
     std::vector<cocos2d::CCPoint> const& pathPoints();
     std::vector<TrialLine> const& trialLines();
     std::vector<cocos2d::CCPoint> const& currentTrialPath();
@@ -108,7 +119,7 @@ namespace counter {
 }
 
 namespace view {
-    void update(PlayLayer*);   // window counter overlay: path, click rings, window numbers, stats
+    void update(PlayLayer*);   // window counter overlay: path, donut rings, window numbers, stats
 }
 
 namespace hud {

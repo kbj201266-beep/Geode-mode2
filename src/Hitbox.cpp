@@ -132,10 +132,12 @@ namespace {
             auto r = objRect(o);
             CCPoint bl(r.getMinX(), r.getMinY()), br(r.getMaxX(), r.getMinY());
             CCPoint tl(r.getMinX(), r.getMaxY()), tr(r.getMaxX(), r.getMaxY());
-            bool floor = o->slopeFloorTop();      // walkable surface on top (a floor slope, not a ceiling one)
-            bool wallLeft = o->slopeWallLeft();   // the vertical side is on the left
-            if (floor) return wallLeft ? std::vector<CCPoint>{bl, br, tl} : std::vector<CCPoint>{bl, br, tr};
-            return wallLeft ? std::vector<CCPoint>{tl, tr, bl} : std::vector<CCPoint>{tl, tr, br};
+            // GD's names describe the FLAT sides of the triangle: slopeFloorTop = the flat (floor) side is at the
+            // top (an upside-down slope), slopeWallLeft = the vertical wall is on the left.
+            bool flatTop = o->slopeFloorTop();
+            bool wallLeft = o->slopeWallLeft();
+            if (flatTop) return wallLeft ? std::vector<CCPoint>{tl, tr, bl} : std::vector<CCPoint>{tl, tr, br};
+            return wallLeft ? std::vector<CCPoint>{bl, br, tl} : std::vector<CCPoint>{bl, br, tr};
         }
         if (isTilted(o)) {
             auto& c = o->m_orientedBox->m_corners;

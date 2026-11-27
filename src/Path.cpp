@@ -23,6 +23,8 @@ namespace {
         auto cp = PlayerCheckpoint::create();
         real->saveToCheckpoint(cp);
         g_fake->loadFromCheckpoint(cp);
+        g_fake->m_playerSpeed = real->m_playerSpeed;      // speed portals: the dummy moves as fast as you
+        g_fake->m_isPlatformer = real->m_isPlatformer;
         g_fake->setVisible(false);
 
         g_sim = true;
@@ -41,7 +43,21 @@ namespace {
 }
 
 bool simulating() { return g_sim; }
-void onSimDeath() { g_simDead = true; }
+// Only real obstacles end the preview. Speed portals and other special objects can report a "death" for the
+// dummy too, which used to stop the path right at the portal so nothing was visible.
+void onSimDeath(GameObject* obj) {
+    if (obj) {
+        switch (obj->m_objectType) {
+            case GameObjectType::Hazard:
+            case GameObjectType::AnimatedHazard:
+            case GameObjectType::Solid:
+            case GameObjectType::Slope:
+            case GameObjectType::Breakable: break;
+            default: return;
+        }
+    }
+    g_simDead = true;
+}
 
 void reset() {
     if (g_fake) {

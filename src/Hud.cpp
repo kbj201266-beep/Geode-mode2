@@ -45,7 +45,7 @@ void update(PlayLayer* pl) {
         std::snprintf(buf, sizeof buf, "Noclip %.1f%%\n", noclip::accuracy());
         text += buf;
     }
-    if (counter::isCounting() || counter::isRecording()) text += counter::statusText() + "\n";
+    if (counter::isRecording()) text += counter::statusText() + "\n";   // counting has its own big text
     info->setString(text.c_str());
 }
 

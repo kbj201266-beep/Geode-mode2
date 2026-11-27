@@ -33,12 +33,12 @@ namespace {
 
     float userSpeed() {
         auto& c = Cfg::get();
-        return c.speedhack ? std::clamp(c.speed, 0.05f, 10.f) : 1.f;
+        return c.speedhack ? std::clamp(c.speed, 0.01f, 10.f) : 1.f;
     }
 }
 
 // Speedhack = every frame's delta time is multiplied (CCScheduler::update hook in Hooks.cpp). Reapplied every
-// frame, so it keeps working after GD resets things, in menus too, and while the 4x counting speed is on.
+// frame, so it keeps working after GD resets things, in menus too, and while the counting speed is on.
 float factor() { return userSpeed() * counter::speedFactor(); }
 
 void updatePitch() {
@@ -53,7 +53,7 @@ void updatePitch() {
 
 // Physical TPS (240..1000). GD already splits every update into 1/240 s steps, so the way to change the tick
 // rate is to call the game's own update() several times per frame with a small fixed dt = 1/TPS (one physics
-// step each). Hooking getModifiedDelta alone breaks time-warp physics - that is why the old version "did nothing".
+// step each). Hooking getModifiedDelta alone breaks time-warp physics.
 // Below 240 TPS the game itself splits again into 1/240 steps, so lower values are not supported.
 int planSteps(float dt, float& step) {
     step = 1.f / std::clamp(Cfg::get().tps, 240.f, 2000.f);

@@ -7,20 +7,23 @@
 //  - Playback: the replay is played back by the mod, on exactly the frames it was recorded on.
 //              "Ignore Inputs" blocks your own clicks meanwhile.
 //  - Count:    1) one normal run of the replay from the level start. It records the player's path, where every
-//                 click happened, and saves a checkpoint a few frames before every click.
+//                 click and release happened, and saves a checkpoint a few frames before every click.
 //                 If the replay dies somewhere, the clicks before that point are still counted.
-//              2) for every click: load the checkpoint before it, shift the click earlier / later by 1,2,3...
-//                 frames, and check whether the player survives until the NEXT click. No level restarts, so
-//                 the attempt counter stays at 1 and it is fast. window = early + late + 1.
+//              2) for every click: load the checkpoint before it and
+//                   - shift the click (with its release) earlier / later by 1,2,3... frames  -> click window
+//                   - shift only the release earlier / later                                 -> release window
+//                 A shift "works" if the player survives until the NEXT click. window = early + late + 1.
+//                 No level restarts, so the attempt counter stays at 1 and it is fast.
 //              3) when done, the level restarts from the beginning.
+//  - Play:     while you (or the bot) play, every click / release shows its window one by one as you reach it.
 // Replays are text files in <save dir>/replays/<name>.ktr:
-//   line 1 inputs "frame:down:p1;"   line 2 results "frame:early:late:counted;"
-//   line 3 click positions "x,y;"     line 4 path "x,y;"
+//   1 inputs "frame:down:p1;"            2 click results "frame:early:late:counted;"
+//   3 click positions "x,y;"             4 path "x,y;"
+//   5 release results "early:late:counted;"   6 release positions "x,y;"
 #include "Common.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <map>
 #include <sstream>
 
 using namespace geode::prelude;
@@ -34,6 +37,8 @@ namespace {
     constexpr size_t kMaxLines = 40;     // trial lines kept on screen for the current click
 
     enum class Phase { Idle, Baseline, Trial };
+    // sides of one click: 0 click earlier, 1 click later, 2 release earlier, 3 release later
+    enum Side { DownEarly = 0, DownLate = 1, RelEarly = 2, RelLate = 3 };
 
     struct Click {
         int down = 0;        // index into macro
@@ -46,9 +51,13 @@ namespace {
         std::vector<Input> macro;
         std::vector<Click> clicks;
         std::vector<Result> results;
-        std::map<int, int> cues;             // click frame -> window, for play-time display
-        std::vector<int> downToClick;        // macro index -> click index (-1 = not a click)
-        std::vector<CCPoint> clickPos;       // where each click happened (from the counting run)
+        std::vector<Cue> cues;               // finished windows in frame order (live display)
+        size_t cueCursor = 0;                // cues already reached in this attempt
+        int lastCue = -1;
+        std::vector<int> downToClick;        // macro index -> click index (-1 = not a click press)
+        std::vector<int> relToClick;         // macro index -> click index (-1 = not a click release)
+        std::vector<CCPoint> clickPos;       // where each press happened (from the counting run)
+        std::vector<CCPoint> relPos;         // where each release happened
         std::vector<CCPoint> path;           // player path from the counting run
         int lastPathFrame = -1;
         int version = 0;                     // bumps whenever the overlay must redraw
@@ -81,11 +90,17 @@ namespace {
     bool active() { return s.phase != Phase::Idle; }
     bool playing() { return s.mode == Mode::Playback && !s.macro.empty() && !active(); }
     int frameOf(GJBaseGameLayer* l) { return l->m_gameState.m_currentProgress; }
+    bool hasPos(CCPoint const& p) { return p.x > kNoPos / 2; }
 
     void syncTrial() { s.trial = s.macro; }
     void syncCursor(int frame) {
         s.cursor = std::lower_bound(s.trial.begin(), s.trial.end(), frame,
                                     [](Input const& i, int f) { return i.frame < f; }) - s.trial.begin();
+    }
+    void syncCues(int frame) {
+        s.cueCursor = std::lower_bound(s.cues.begin(), s.cues.end(), frame,
+                                       [](Cue const& c, int f) { return c.frame < f; }) - s.cues.begin();
+        s.lastCue = static_cast<int>(s.cueCursor) - 1;
     }
 
     void releaseCps() {
@@ -121,9 +136,23 @@ namespace {
         }
     }
 
+    // every counted press and release, in counting order (press of click 0, its release, press of click 1 ...)
+    std::vector<Cue> collectCues() {
+        std::vector<Cue> out;
+        for (size_t i = 0; i < s.results.size(); ++i) {
+            auto& r = s.results[i];
+            if (r.counted) out.push_back({r.frame, r.window(), false, i < s.clickPos.size() ? s.clickPos[i] : CCPoint(kNoPos, kNoPos)});
+            if (r.relCounted && r.relFrame >= 0)
+                out.push_back({r.relFrame, r.relWindow(), true, i < s.relPos.size() ? s.relPos[i] : CCPoint(kNoPos, kNoPos)});
+        }
+        return out;
+    }
+
     void buildCues() {
-        s.cues.clear();
-        for (auto& r : s.results) if (r.counted) s.cues[r.frame] = r.window();
+        s.cues = collectCues();
+        std::stable_sort(s.cues.begin(), s.cues.end(), [](Cue const& a, Cue const& b) { return a.frame < b.frame; });
+        s.cueCursor = 0;
+        s.lastCue = -1;
     }
 
     void buildClicks() {
@@ -142,10 +171,17 @@ namespace {
             s.clicks.push_back(c);
         }
         s.results.assign(s.clicks.size(), Result{});
-        for (size_t i = 0; i < s.clicks.size(); ++i) s.results[i].frame = s.macro[s.clicks[i].down].frame;
         s.downToClick.assign(s.macro.size(), -1);
-        for (size_t i = 0; i < s.clicks.size(); ++i) s.downToClick[s.clicks[i].down] = static_cast<int>(i);
-        s.clickPos.assign(s.clicks.size(), CCPoint{kNoPos, kNoPos});
+        s.relToClick.assign(s.macro.size(), -1);
+        for (size_t i = 0; i < s.clicks.size(); ++i) {
+            auto& c = s.clicks[i];
+            s.results[i].frame = s.macro[c.down].frame;
+            s.results[i].relFrame = c.rel >= 0 ? s.macro[c.rel].frame : -1;
+            s.downToClick[c.down] = static_cast<int>(i);
+            if (c.rel >= 0) s.relToClick[c.rel] = static_cast<int>(i);
+        }
+        s.clickPos.assign(s.clicks.size(), CCPoint(kNoPos, kNoPos));
+        s.relPos.assign(s.clicks.size(), CCPoint(kNoPos, kNoPos));
     }
 
     std::string encode() {
@@ -159,6 +195,10 @@ namespace {
         o << '\n';
         for (auto& p : s.path) { std::snprintf(b, sizeof b, "%.1f,%.1f;", p.x, p.y); o << b; }
         o << '\n';
+        for (auto& x : s.results) o << x.relEarly << ':' << x.relLate << ':' << (x.relCounted ? 1 : 0) << ';';
+        o << '\n';
+        for (auto& p : s.relPos) { std::snprintf(b, sizeof b, "%.1f,%.1f;", p.x, p.y); o << b; }
+        o << '\n';
         return o.str();
     }
 
@@ -170,7 +210,7 @@ namespace {
             else if (ch != '\r') cur += ch;
         }
         if (!cur.empty()) lines.push_back(cur);
-        while (lines.size() < 4) lines.emplace_back();
+        while (lines.size() < 6) lines.emplace_back();
 
         s.macro.clear();
         parse(lines[0], [](int f, int d, int p, int) { s.macro.push_back({f, d != 0, p != 0}); });
@@ -191,6 +231,20 @@ namespace {
         });
         s.path.clear();
         parsePts(lines[3], [](float x, float y) { s.path.push_back(CCPoint(x, y)); });
+        size_t r = 0;
+        parse(lines[4], [&](int e, int l, int counted, int) {
+            if (r < s.results.size()) {
+                s.results[r].relEarly = e;
+                s.results[r].relLate = l;
+                s.results[r].relCounted = counted != 0 && s.results[r].relFrame >= 0;
+            }
+            ++r;
+        });
+        size_t q = 0;
+        parsePts(lines[5], [&](float x, float y) {
+            if (q < s.relPos.size()) s.relPos[q] = CCPoint(x, y);
+            ++q;
+        });
         buildCues();
         syncTrial();
         s.cursor = 0;
@@ -235,32 +289,58 @@ namespace {
     }
 
     // ---------- trial construction ----------
-    // click = -1 builds the untouched macro (baseline). Returns false if the shift breaks the input order.
-    bool makeTrial(int click, int off) {
+    // click = -1 builds the untouched macro (baseline). Returns false if the shift is impossible
+    // (it would reorder inputs, or the release would come before its press / after the next click).
+    bool makeTrial(int click, int off, int side) {
         s.trial = s.macro;
         if (click < 0) {
             s.checkFrame = (s.macro.empty() ? 0 : s.macro.back().frame) + 90;
             return true;
         }
         auto& c = s.clicks[click];
-        s.trial[c.down].frame += off;
-        if (c.rel >= 0) s.trial[c.rel].frame += off;
+        bool releaseOnly = side >= RelEarly;
+        if (releaseOnly) {
+            if (c.rel < 0) return false;
+            s.trial[c.rel].frame += off;
+            if (s.trial[c.rel].frame <= s.trial[c.down].frame) return false;
+            if (s.trial[c.rel].frame >= c.checkFrame) return false;
+        } else {
+            s.trial[c.down].frame += off;
+            if (c.rel >= 0) s.trial[c.rel].frame += off;
+            if (s.trial[c.down].frame >= c.checkFrame) return false;
+        }
         for (size_t i = 0; i < s.trial.size(); ++i) {
             if (s.trial[i].frame < 1) return false;
             if (i > 0 && s.trial[i].frame < s.trial[i - 1].frame) return false;
         }
-        if (s.trial[c.down].frame >= c.checkFrame) return false;
         s.checkFrame = c.checkFrame;
         return true;
     }
 
+    void advanceClick() {
+        ++s.k;
+        s.dir = DownEarly;
+        s.off = -1;
+        s.lines.clear();
+    }
+
+    // move on to the next side of the current click, or to the next click
     void nextSide() {
-        if (s.dir == 0) { s.dir = 1; s.off = 1; }
-        else {
-            if (s.k < static_cast<int>(s.results.size())) s.results[s.k].counted = true;
-            ++s.k; s.dir = 0; s.off = -1;
-            s.lines.clear();
-            ++s.version;      // a click got its final window: redraw rings / stats
+        auto& r = s.results[s.k];
+        switch (s.dir) {
+            case DownEarly: s.dir = DownLate; s.off = 1; break;
+            case DownLate:
+                r.counted = true;          // the click window is final: it appears on screen now
+                ++s.version;
+                if (s.clicks[s.k].rel >= 0) { s.dir = RelEarly; s.off = -1; }
+                else advanceClick();
+                break;
+            case RelEarly: s.dir = RelLate; s.off = 1; break;
+            default:
+                r.relCounted = true;       // the release window is final
+                ++s.version;
+                advanceClick();
+                break;
         }
     }
 
@@ -275,20 +355,23 @@ namespace {
         s.trialPath.clear();
         releaseCps();
         syncTrial();
+        buildCues();
         ++s.version;
     }
 
     void complete() {
-        buildCues();
-        if (Cfg::get().saveOnFinish) autosave();
+        if (Cfg::get().saveOnFinish) {
+            buildCues();
+            autosave();
+        }
         stop("Done - " + std::to_string(s.limit) + " clicks counted");
         FMODAudioEngine::sharedEngine()->playEffect(std::string("ding_9.wav"_spr), 1.f, 1.f, 1.f);
     }
 
     void scheduleNext() {
         while (s.k < s.limit) {
-            if (makeTrial(s.k, s.off)) { s.needReset = true; return; }
-            nextSide();     // impossible shift (would reorder inputs) counts as a fail
+            if (makeTrial(s.k, s.off, s.dir)) { s.needReset = true; return; }
+            nextSide();     // impossible shift counts as a fail
         }
         complete();
     }
@@ -303,7 +386,7 @@ namespace {
                 s.limit = usable;
             }
             s.phase = Phase::Trial;
-            s.k = 0; s.dir = 0; s.off = -1;
+            s.k = 0; s.dir = DownEarly; s.off = -1;
         } else {
             if (!s.trialPath.empty()) {
                 s.lines.push_back({s.trialPath, ok});
@@ -311,8 +394,13 @@ namespace {
             }
             auto& r = s.results[s.k];
             if (ok) {
-                (s.dir == 0 ? r.early : r.late)++;
-                s.off += (s.dir == 0 ? -1 : 1);
+                switch (s.dir) {
+                    case DownEarly: r.early++; break;
+                    case DownLate: r.late++; break;
+                    case RelEarly: r.relEarly++; break;
+                    default: r.relLate++; break;
+                }
+                s.off += (s.dir % 2 == 0) ? -1 : 1;
                 if (std::abs(s.off) > kMaxSide) nextSide();
             } else {
                 nextSide();
@@ -344,6 +432,8 @@ void onLevelEnter(PlayLayer*) {
     s.trialPath.clear();
     refreshList();
     s.cursor = 0;
+    s.cueCursor = 0;
+    s.lastCue = -1;
     ++s.version;
 }
 
@@ -387,20 +477,28 @@ void beforeStep(GJBaseGameLayer* l) {
         while (s.cursor < s.trial.size() && s.trial[s.cursor].frame <= f) {
             size_t index = s.cursor++;
             auto& in = s.trial[index];
-            if (baseline && in.down && index < s.downToClick.size() && s.downToClick[index] >= 0) {
+            if (baseline) {
                 auto p = in.p1 ? l->m_player1 : l->m_player2;
-                if (p) s.clickPos[s.downToClick[index]] = p->getPosition();
+                if (p && in.down && index < s.downToClick.size() && s.downToClick[index] >= 0)
+                    s.clickPos[s.downToClick[index]] = p->getPosition();
+                if (p && !in.down && index < s.relToClick.size() && s.relToClick[index] >= 0)
+                    s.relPos[s.relToClick[index]] = p->getPosition();
             }
             l->handleButton(in.down, 1, in.p1);
         }
         s.injecting = false;
     }
-    if (!active() && !s.recording && Cfg::get().counterHud) {
-        auto it = s.cues.find(f);
-        if (it != s.cues.end()) {
-            hud::flash(std::to_string(it->second) + "f");
+
+    // live display: every press / release whose frame is reached now shows its window
+    if (!active() && !s.recording) {
+        while (s.cueCursor < s.cues.size() && s.cues[s.cueCursor].frame <= f) {
+            auto& c = s.cues[s.cueCursor];
+            s.lastCue = static_cast<int>(s.cueCursor);
+            ++s.cueCursor;
+            if (c.frame != f) continue;
+            if (Cfg::get().counterHud) hud::flash(std::to_string(c.window) + "f");
             if (Cfg::get().counterSfx) {
-                auto name = "ding_" + std::to_string(std::min(it->second, 12)) + ".wav";
+                auto name = "ding_" + std::to_string(std::min(c.window, 12)) + ".wav";
                 FMODAudioEngine::sharedEngine()->playEffect(
                     std::string(Mod::get()->expandSpriteName(name.c_str())), 1.f, 1.f, 1.f);
             }
@@ -445,6 +543,7 @@ void onReset(PlayLayer* pl) {
                       s.macro.end());
     }
     syncCursor(f);
+    syncCues(f);
     s.trialDead = false;
     s.completed = false;
     s.lastPathFrame = -1;
@@ -498,6 +597,9 @@ void startCounting() {
     if (s.macro.empty()) { s.msg = "No replay - record or load one first"; return; }
     s.armed = s.recording = false;
     buildClicks();
+    s.cues.clear();
+    s.cueCursor = 0;
+    s.lastCue = -1;
     releaseCps();
     s.cps.assign(s.clicks.size(), nullptr);
     s.cpFrame.resize(s.clicks.size());
@@ -512,7 +614,7 @@ void startCounting() {
     s.deathFrame = 0;
     s.restartAfter = false;
     s.phase = Phase::Baseline;
-    makeTrial(-1, 0);
+    makeTrial(-1, 0, DownEarly);
     s.needReset = true;
     s.t0 = std::chrono::steady_clock::now();
     s.msg = "Counting";
@@ -526,6 +628,7 @@ void cancelCounting() { if (active()) stop("Stopped"); }
 bool isRecording() { return s.recording || s.armed; }
 bool botPlaying() { return s.mode == Mode::Playback && !s.macro.empty(); }
 bool isCounting() { return active(); }
+bool baselineRunning() { return s.phase == Phase::Baseline; }
 
 std::string countingText() {
     if (!active()) return "";
@@ -567,7 +670,7 @@ std::string summaryText() {
     std::sort(idx.begin(), idx.end(), [](size_t a, size_t b) { return s.results[a].window() < s.results[b].window(); });
     std::ostringstream o;
     char buf[96];
-    std::snprintf(buf, sizeof buf, "%d clicks   average window %.1f f\nTightest inputs:\n",
+    std::snprintf(buf, sizeof buf, "%d clicks   average window %.1f f\nTightest clicks:\n",
                   static_cast<int>(idx.size()), sum / idx.size());
     o << buf;
     for (size_t n = 0; n < std::min<size_t>(5, idx.size()); ++n) {
@@ -585,22 +688,18 @@ std::string infoText() {
     for (size_t i = 0; i < s.results.size(); ++i) {
         auto& r = s.results[i];
         if (!r.counted) continue;
-        o << "#" << (i + 1) << "  frame " << r.frame << "  " << r.window() << "f  (-" << r.early << " / +" << r.late << ")\n";
+        o << "#" << (i + 1) << "  frame " << r.frame << "  click " << r.window() << "f (-" << r.early << " / +" << r.late << ")";
+        if (r.relCounted) o << "  release " << r.relWindow() << "f (-" << r.relEarly << " / +" << r.relLate << ")";
+        o << "\n";
     }
     return o.str();
 }
 
 std::vector<Result> const& results() { return s.results; }
-
-std::vector<ClickView> clickViews() {
-    std::vector<ClickView> out;
-    for (size_t i = 0; i < s.results.size() && i < s.clickPos.size(); ++i) {
-        if (!s.results[i].counted || s.clickPos[i].x <= kNoPos / 2) continue;
-        out.push_back({s.clickPos[i], s.results[i].window()});
-    }
-    return out;
-}
-
+std::vector<Cue> const& cues() { return s.cues; }
+std::vector<Cue> countedCues() { return collectCues(); }
+size_t cueCursor() { return s.cueCursor; }
+int lastCue() { return s.lastCue; }
 std::vector<CCPoint> const& pathPoints() { return s.path; }
 std::vector<TrialLine> const& trialLines() { return s.lines; }
 std::vector<CCPoint> const& currentTrialPath() { return s.trialPath; }
@@ -629,7 +728,9 @@ std::string newReplay(std::string const& rawName) {
     refreshList();
     if (std::find(s.names.begin(), s.names.end(), name) != s.names.end()) return "A replay with that name exists";
     s.macro.clear(); s.clicks.clear(); s.results.clear(); s.cues.clear();
-    s.clickPos.clear(); s.path.clear(); s.downToClick.clear();
+    s.clickPos.clear(); s.relPos.clear(); s.path.clear(); s.downToClick.clear(); s.relToClick.clear();
+    s.cueCursor = 0;
+    s.lastCue = -1;
     syncTrial();
     s.cursor = 0;
     ++s.version;
@@ -653,6 +754,7 @@ std::string loadReplay() {
     auto r = utils::file::readString(replayPath(s.names[s.sel]));
     if (!r.isOk()) return "Could not read the file";
     decode(r.unwrap());
+    if (auto pl = PlayLayer::get()) syncCues(frameOf(pl));
     s.msg = "Loaded " + s.names[s.sel];
     return "Loaded \"" + s.names[s.sel] + "\" (" + std::to_string(s.clicks.size()) + " clicks)";
 }

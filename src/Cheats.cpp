@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <unordered_map>
 
 using namespace geode::prelude;
 
@@ -71,6 +72,7 @@ namespace kt::practice {
 // player actually is: the level time restored from the checkpoint, plus the song start offset.
 void sync(PlayLayer* pl) {
     if (!Cfg::get().practiceSync || !pl->m_isPracticeMode || !pl->m_player1) return;
+    if (counter::isCounting()) return;
     double t = pl->m_gameState.m_levelTime;
     double offset = pl->m_levelSettings ? pl->m_levelSettings->m_songOffset : 0.0;
     unsigned ms = static_cast<unsigned>(std::max(0.0, (t + offset) * 1000.0));
@@ -78,15 +80,71 @@ void sync(PlayLayer* pl) {
 }
 }
 
+// Layout mode: background and ground stay as they are, decoration is hidden, and every object with a hitbox
+// is painted white (GD's built-in "White" color channel 1011). Done once per reset instead of hooking every
+// setVisible call, which is what made it lag before. Turning it off restores the original state.
 namespace kt::layout {
-bool isDeco(GameObject* o) {
-    return o->m_objectType == GameObjectType::Decoration && !o->m_isTrigger;
-}
-void apply(PlayLayer* pl) {
-    if (!Cfg::get().layoutMode) return;
-    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
-        if (obj && isDeco(obj)) obj->setVisible(false);   // hooked setVisible keeps it hidden afterwards
+namespace {
+    constexpr int kWhite = 1011;
+    struct Orig {
+        bool hide;
+        int base;
+        int detail;
+    };
+    PlayLayer* g_owner = nullptr;
+    bool g_applied = false;
+    std::unordered_map<GameObject*, Orig> g_orig;
+
+    bool isDeco(GameObject* o) {
+        return o->m_objectType == GameObjectType::Decoration && !o->m_isTrigger;
     }
-    if (pl->m_background) pl->m_background->setColor({40, 125, 255});
+    bool hasHitbox(GameObject* o) {
+        switch (o->m_objectType) {
+            case GameObjectType::Decoration:
+            case GameObjectType::Modifier:
+            case GameObjectType::CollisionObject:
+            case GameObjectType::EnterEffectObject:
+            case GameObjectType::Special: return false;
+            default: return true;
+        }
+    }
+}
+
+void apply(PlayLayer* pl) {
+    if (g_owner != pl) {
+        g_owner = pl;
+        g_orig.clear();
+        g_applied = false;
+    }
+    bool on = Cfg::get().layoutMode;
+    if (!on && !g_applied) return;
+    if (!pl->m_objects) return;
+
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+        if (!obj) continue;
+        bool deco = isDeco(obj), solid = hasHitbox(obj);
+        if (!deco && !solid) continue;
+        if (on) {
+            if (!g_orig.count(obj)) {
+                g_orig[obj] = {obj->m_isHide, obj->m_baseColor ? obj->m_baseColor->m_colorID : 0,
+                               obj->m_detailColor ? obj->m_detailColor->m_colorID : 0};
+            }
+            if (deco) {
+                obj->m_isHide = true;
+                obj->setVisible(false);
+            } else {
+                if (obj->m_baseColor) obj->m_baseColor->m_colorID = kWhite;
+                if (obj->m_detailColor) obj->m_detailColor->m_colorID = kWhite;
+            }
+        } else {
+            auto it = g_orig.find(obj);
+            if (it == g_orig.end()) continue;
+            obj->m_isHide = it->second.hide;
+            if (obj->m_baseColor) obj->m_baseColor->m_colorID = it->second.base;
+            if (obj->m_detailColor) obj->m_detailColor->m_colorID = it->second.detail;
+        }
+    }
+    if (!on) g_orig.clear();
+    g_applied = on;
 }
 }

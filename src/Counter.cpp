@@ -5,10 +5,11 @@
 //              die and respawn at a checkpoint, the replay is cut back to the checkpoint frame and recording
 //              continues (nothing is reset). Finish the level to end the recording.
 //  - Playback: the replay is played back by the mod. "Ignore Inputs" blocks your own clicks meanwhile.
-//  - Count:    the replay is run from the level start. Each click is shifted earlier / later by 1,2,3... frames;
-//              a shift "works" if the player survives until the NEXT click. window = early + late + 1.
-//              The first (unshifted) run also stores the player's path and where every click happened,
-//              which the on-level overlay (View.cpp) draws.
+//  - Count:    1) one normal run of the replay from the level start. It records the player's path, where every
+//                 click happened, and saves a checkpoint a few frames before every click.
+//              2) for every click: load the checkpoint before it, shift the click earlier / later by 1,2,3...
+//                 frames, and check whether the player survives until the NEXT click. No level restarts, so
+//                 the attempt counter stays at 1 and it is fast. window = early + late + 1.
 // Replays are text files in <save dir>/replays/<name>.ktr:
 //   line 1 inputs "frame:down:p1;"   line 2 results "frame:early:late:counted;"
 //   line 3 click positions "x,y;"     line 4 path "x,y;"
@@ -24,9 +25,10 @@ using namespace geode::prelude;
 namespace kt::counter {
 
 namespace {
-    constexpr int kMaxSide = 6;          // search at most 6 frames each way -> window up to 13f
+    constexpr int kMaxSide = 12;         // search at most 12 frames each way -> window up to 25f
     constexpr float kCountSpeed = 4.f;   // replay speed while counting
     constexpr float kNoPos = -1e9f;
+    constexpr size_t kMaxLines = 40;     // trial lines kept on screen for the current click
 
     enum class Phase { Idle, Baseline, Trial };
 
@@ -47,6 +49,12 @@ namespace {
         std::vector<CCPoint> path;           // player path from the counting run
         int lastPathFrame = -1;
         int version = 0;                     // bumps whenever the overlay must redraw
+
+        std::vector<CheckpointObject*> cps;  // retained checkpoint a few frames before each click
+        std::vector<int> cpFrame;
+        size_t nextCp = 0;
+        std::vector<CCPoint> trialPath;      // path of the running trial
+        std::vector<TrialLine> lines;        // finished trials of the current click
 
         std::vector<std::string> names;      // replay files on disk
         int sel = 0;
@@ -71,6 +79,13 @@ namespace {
     void syncCursor(int frame) {
         s.cursor = std::lower_bound(s.trial.begin(), s.trial.end(), frame,
                                     [](Input const& i, int f) { return i.frame < f; }) - s.trial.begin();
+    }
+
+    void releaseCps() {
+        for (auto cp : s.cps) if (cp) cp->release();
+        s.cps.clear();
+        s.cpFrame.clear();
+        s.nextCp = 0;
     }
 
     // ---------- (de)serialization ----------
@@ -237,6 +252,8 @@ namespace {
         else {
             if (s.k < static_cast<int>(s.results.size())) s.results[s.k].counted = true;
             ++s.k; s.dir = 0; s.off = -1;
+            s.lines.clear();
+            ++s.version;      // a click got its final window: redraw rings / stats
         }
     }
 
@@ -249,6 +266,9 @@ namespace {
         s.phase = Phase::Idle;
         s.needReset = false;
         s.msg = why;
+        s.lines.clear();
+        s.trialPath.clear();
+        releaseCps();
         syncTrial();
         ++s.version;
         CCDirector::get()->getScheduler()->setTimeScale(desiredScale());
@@ -256,7 +276,7 @@ namespace {
 
     void complete() {
         buildCues();
-        autosave();
+        if (Cfg::get().saveOnFinish) autosave();
         stop("Done - " + std::to_string(s.results.size()) + " clicks counted");
         FMODAudioEngine::sharedEngine()->playEffect(std::string("ding_9.wav"_spr), 1.f, 1.f, 1.f);
     }
@@ -275,6 +295,10 @@ namespace {
             s.phase = Phase::Trial;
             s.k = 0; s.dir = 0; s.off = -1;
         } else {
+            if (!s.trialPath.empty()) {
+                s.lines.push_back({s.trialPath, ok});
+                if (s.lines.size() > kMaxLines) s.lines.erase(s.lines.begin());
+            }
             auto& r = s.results[s.k];
             if (ok) {
                 (s.dir == 0 ? r.early : r.late)++;
@@ -284,16 +308,26 @@ namespace {
                 nextSide();
             }
         }
+        s.trialPath.clear();
         scheduleNext();
+    }
+
+    std::string eta(float sec) {
+        int t = static_cast<int>(sec + 0.5f);
+        if (t >= 60) return "~" + std::to_string(t / 60) + "m " + std::to_string(t % 60) + "s";
+        return "~" + std::to_string(t) + "s";
     }
 }
 
 // ================= hook-facing API =================
 
 void onLevelEnter(PlayLayer*) {
-    s.phase = Phase::Idle;
+    if (active()) stop("Stopped");
     s.armed = s.recording = false;
     if (s.mode == Mode::Record) s.mode = Mode::Disabled;
+    releaseCps();
+    s.lines.clear();
+    s.trialPath.clear();
     refreshList();
     s.cursor = 0;
     ++s.version;
@@ -313,10 +347,24 @@ void beforeStep(GJBaseGameLayer* l) {
     if (active() && s.needReset) return;      // the old run is still going until the reset happens
     int f = frameOf(l);
     bool baseline = s.phase == Phase::Baseline;
-    if (baseline && f != s.lastPathFrame && f % 2 == 0 && l->m_player1) {   // the counting run records the path
-        s.lastPathFrame = f;
-        s.path.push_back(l->m_player1->getPosition());
+
+    if (baseline) {
+        if (f != s.lastPathFrame && f % 2 == 0 && l->m_player1) {     // path of the normal run
+            s.lastPathFrame = f;
+            s.path.push_back(l->m_player1->getPosition());
+        }
+        // a checkpoint a few frames before every click, so trials never restart the level
+        auto pl = PlayLayer::get();
+        while (pl && s.nextCp < s.cpFrame.size() && s.cpFrame[s.nextCp] <= f) {
+            if (!s.cps[s.nextCp]) {
+                if (auto cp = pl->createCheckpoint()) { cp->retain(); s.cps[s.nextCp] = cp; }
+            }
+            ++s.nextCp;
+        }
+    } else if (s.phase == Phase::Trial && f % 2 == 0 && l->m_player1) {
+        s.trialPath.push_back(l->m_player1->getPosition());
     }
+
     if (active() || playing()) {
         s.injecting = true;
         while (s.cursor < s.trial.size() && s.trial[s.cursor].frame <= f) {
@@ -378,15 +426,22 @@ void onReset(PlayLayer* pl) {
         s.macro.erase(std::remove_if(s.macro.begin(), s.macro.end(), [&](Input const& i) { return i.frame >= f; }),
                       s.macro.end());
     }
-    syncCursor(active() ? 0 : f);
+    syncCursor(f);
     s.trialDead = false;
     s.completed = false;
     s.lastPathFrame = -1;
+    if (active()) s.trialPath.clear();
 }
 
 void update(PlayLayer* pl) {
     if (!active()) return;
-    if (s.needReset) { s.needReset = false; pl->resetLevelFromStart(); return; }
+    if (s.needReset) {
+        s.needReset = false;
+        bool useCp = s.phase == Phase::Trial && s.k < static_cast<int>(s.cps.size()) && s.cps[s.k];
+        if (useCp) pl->loadFromCheckpoint(s.cps[s.k]);
+        else pl->resetLevelFromStart();
+        return;
+    }
     int f = frameOf(pl);
     if (s.completed) finish(true);
     else if (s.trialDead) finish(false);
@@ -418,7 +473,15 @@ void startCounting() {
     if (s.macro.empty()) { s.msg = "No replay - record or load one first"; return; }
     s.armed = s.recording = false;
     buildClicks();
+    releaseCps();
+    s.cps.assign(s.clicks.size(), nullptr);
+    s.cpFrame.resize(s.clicks.size());
+    for (size_t i = 0; i < s.clicks.size(); ++i) {
+        s.cpFrame[i] = std::max(0, s.macro[s.clicks[i].down].frame - kMaxSide - 2);
+    }
     s.path.clear();
+    s.lines.clear();
+    s.trialPath.clear();
     s.lastPathFrame = -1;
     s.phase = Phase::Baseline;
     makeTrial(-1, 0);
@@ -429,25 +492,35 @@ void startCounting() {
     CCDirector::get()->getScheduler()->setTimeScale(kCountSpeed);
 }
 
-void cancelCounting() { if (active()) stop("Cancelled"); }
+void cancelCounting() { if (active()) stop("Stopped"); }
 
 bool isRecording() { return s.recording || s.armed; }
 bool isCounting() { return active(); }
+
+std::string countingText() {
+    if (!active()) return "";
+    int n = static_cast<int>(s.clicks.size());
+    if (s.phase == Phase::Baseline) return "Preparing.. 0/" + std::to_string(n) + "\nETA ~?";
+    float el = std::chrono::duration<float>(std::chrono::steady_clock::now() - s.t0).count();
+    std::string e = s.k > 0 ? eta(el / s.k * (n - s.k)) : std::string("~?");
+    return "Counting.. " + std::to_string(s.k) + "/" + std::to_string(n) + "\nETA " + e;
+}
 
 std::string statusText() {
     if (s.armed) return "Waiting - restart the level to start recording";
     if (s.recording) return "Recording... " + std::to_string(s.macro.size()) + " inputs";
     if (active()) {
-        int n = static_cast<int>(s.clicks.size());
-        if (s.phase == Phase::Baseline) return "Checking that the replay clears the level...";
-        float el = std::chrono::duration<float>(std::chrono::steady_clock::now() - s.t0).count();
-        float eta = s.k > 0 ? el / s.k * (n - s.k) : 0.f;
-        char buf[160];
-        std::snprintf(buf, sizeof buf, "Counting click %d/%d   ETA %d:%02d", std::min(s.k + 1, n), n,
-                      static_cast<int>(eta) / 60, static_cast<int>(eta) % 60);
-        return buf;
+        auto t = countingText();
+        std::replace(t.begin(), t.end(), '\n', ' ');
+        return t;
     }
     return s.msg;
+}
+
+std::string macroInfo() {
+    std::string state = s.recording ? "Recording" : s.mode == Mode::Playback ? "Playing"
+                      : active() ? "Counting" : "Loaded";
+    return state + "  -  " + std::to_string(s.macro.size()) + " inputs at 240 TPS";
 }
 
 std::string summaryText() {
@@ -474,6 +547,17 @@ std::string summaryText() {
     return o.str();
 }
 
+std::string infoText() {
+    std::ostringstream o;
+    o << "Replay: " << currentName() << "\n" << summaryText() << "\nAll clicks:\n";
+    for (size_t i = 0; i < s.results.size(); ++i) {
+        auto& r = s.results[i];
+        if (!r.counted) continue;
+        o << "#" << (i + 1) << "  frame " << r.frame << "  " << r.window() << "f  (-" << r.early << " / +" << r.late << ")\n";
+    }
+    return o.str();
+}
+
 std::vector<Result> const& results() { return s.results; }
 
 std::vector<ClickView> clickViews() {
@@ -486,6 +570,8 @@ std::vector<ClickView> clickViews() {
 }
 
 std::vector<CCPoint> const& pathPoints() { return s.path; }
+std::vector<TrialLine> const& trialLines() { return s.lines; }
+std::vector<CCPoint> const& currentTrialPath() { return s.trialPath; }
 int version() { return s.version; }
 
 // ---------- replay files ----------

@@ -257,13 +257,8 @@ namespace {
         }
     }
 
-    float desiredScale() {
-        auto& c = Cfg::get();
-        return c.speedhack ? c.speed : 1.f;
-    }
-
     void stop(std::string const& why) {
-        s.phase = Phase::Idle;
+        s.phase = Phase::Idle;       // the 4x counting speed ends with the phase (see speedFactor)
         s.needReset = false;
         s.msg = why;
         s.lines.clear();
@@ -271,7 +266,6 @@ namespace {
         releaseCps();
         syncTrial();
         ++s.version;
-        CCDirector::get()->getScheduler()->setTimeScale(desiredScale());
     }
 
     void complete() {
@@ -489,8 +483,9 @@ void startCounting() {
     s.t0 = std::chrono::steady_clock::now();
     s.msg = "Counting";
     ++s.version;
-    CCDirector::get()->getScheduler()->setTimeScale(kCountSpeed);
 }
+
+float speedFactor() { return active() ? kCountSpeed : 1.f; }
 
 void cancelCounting() { if (active()) stop("Stopped"); }
 
@@ -520,7 +515,9 @@ std::string statusText() {
 std::string macroInfo() {
     std::string state = s.recording ? "Recording" : s.mode == Mode::Playback ? "Playing"
                       : active() ? "Counting" : "Loaded";
-    return state + "  -  " + std::to_string(s.macro.size()) + " inputs at 240 TPS";
+    auto& c = Cfg::get();
+    int tps = c.tpsBypass ? static_cast<int>(c.tps) : 240;
+    return state + "  -  " + std::to_string(s.macro.size()) + " inputs at " + std::to_string(tps) + " TPS";
 }
 
 std::string summaryText() {

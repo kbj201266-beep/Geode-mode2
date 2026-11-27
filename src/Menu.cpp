@@ -364,6 +364,7 @@ namespace {
                     break;
                 case Display:
                     addToggle("Layout mode", c.layoutMode, true);
+                    addToggle("Ultra low detail (less lag)", c.ultraLow, true);
                     addToggle("Practice music sync", c.practiceSync);
                     addToggle("Counter overlay", c.counterOverlay);
                     addToggle("Window cue on screen", c.counterHud);

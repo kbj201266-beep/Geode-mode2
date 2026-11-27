@@ -26,4 +26,7 @@ void Cfg::save() const {
     KT_FLOATS(X)
     KT_INTS(X)
 #undef X
+    // Write to disk now. Otherwise settings only reach the disk when the game closes normally - on a phone the
+    // game is usually swiped away, so changes (like TPS back to 240) were lost and the old value came back.
+    (void)m->saveData();
 }

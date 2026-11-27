@@ -82,10 +82,14 @@ namespace {
         void ccTouchCancelled(CCTouch*, CCEvent*) override { m_down = false; }
 
         // Hidden while a level is being played (normal or practice) and while the menu is open.
-        // In a level it shows up again as soon as you pause.
+        // In a level it shows up again when you pause and on the level-complete screen.
         void tick(float) {
             bool hide = isOpen();
-            if (auto pl = PlayLayer::get()) hide = hide || !pl->m_isPaused || counter::isCounting();
+            if (auto pl = PlayLayer::get()) {
+                bool finished = pl->m_hasCompletedLevel || pl->m_levelEndAnimationStarted;
+                bool playing = !pl->m_isPaused && !finished;
+                hide = hide || playing || counter::isCounting();
+            }
             if (hide && m_down) m_down = false;
             this->setVisible(!hide);
         }

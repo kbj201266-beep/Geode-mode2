@@ -24,34 +24,44 @@ void reset() { g_steps = g_bad = 0; g_hitThisStep = false; }
 
 namespace kt::speed {
 namespace {
-    float g_lastScale = -1.f;
+    float g_lastPitch = -1.f;
+    float g_acc = 0.f;
+    constexpr int kMaxUpdates = 40;      // physics updates per rendered frame (keeps slow devices alive)
     int g_stepCount = 0;
     float g_tps = 0.f;
     std::chrono::steady_clock::time_point g_t0 = std::chrono::steady_clock::now();
-}
 
-void apply() {
-    auto& c = Cfg::get();
-    float s = c.speedhack ? std::clamp(c.speed, 0.05f, 10.f) : 1.f;
-    if (s == g_lastScale) return;
-    g_lastScale = s;
-    CCDirector::get()->getScheduler()->setTimeScale(s);
-    if (auto fmod = FMODAudioEngine::sharedEngine()) {
-        if (fmod->m_backgroundMusicChannel) fmod->m_backgroundMusicChannel->setPitch(s);
+    float userSpeed() {
+        auto& c = Cfg::get();
+        return c.speedhack ? std::clamp(c.speed, 0.05f, 10.f) : 1.f;
     }
 }
 
-// Physical TPS. Returns a time slice made of whole ticks of length 1/tps and keeps the remainder in the
-// game's own m_extraDelta. NOTE: verify in game with "Show TPS" - GD may still split the slice at 240 TPS.
-double modifiedDelta(GJBaseGameLayer* layer, float dt) {
-    double tick = 1.0 / std::clamp(static_cast<double>(Cfg::get().tps), 30.0, 2000.0);
-    double warp = std::clamp(static_cast<double>(layer->m_gameState.m_timeWarp), 0.01, 1.0);
-    tick *= warp;
-    double total = static_cast<double>(dt) + layer->m_extraDelta;
-    double steps = std::floor(total / tick);
-    double used = steps * tick;
-    layer->m_extraDelta = total - used;
-    return used;
+// Speedhack = every frame's delta time is multiplied (CCScheduler::update hook in Hooks.cpp). Reapplied every
+// frame, so it keeps working after GD resets things, in menus too, and while the 4x counting speed is on.
+float factor() { return userSpeed() * counter::speedFactor(); }
+
+void updatePitch() {
+    float p = userSpeed();
+    bool need = p != 1.f || g_lastPitch != 1.f;     // songs create new channels, so keep reapplying while != 1
+    g_lastPitch = p;
+    if (!need) return;
+    if (auto fmod = FMODAudioEngine::sharedEngine()) {
+        if (fmod->m_backgroundMusicChannel) fmod->m_backgroundMusicChannel->setPitch(p);
+    }
+}
+
+// Physical TPS (240..1000). GD already splits every update into 1/240 s steps, so the way to change the tick
+// rate is to call the game's own update() several times per frame with a small fixed dt = 1/TPS (one physics
+// step each). Hooking getModifiedDelta alone breaks time-warp physics - that is why the old version "did nothing".
+// Below 240 TPS the game itself splits again into 1/240 steps, so lower values are not supported.
+int planSteps(float dt, float& step) {
+    step = 1.f / std::clamp(Cfg::get().tps, 240.f, 2000.f);
+    g_acc += dt;
+    int n = static_cast<int>(g_acc / step);
+    if (n > kMaxUpdates) { n = kMaxUpdates; g_acc = 0.f; }
+    else g_acc -= n * step;
+    return n;
 }
 
 void onStep() {

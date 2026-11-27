@@ -1,8 +1,10 @@
 // The toolkit menu: dark rounded panel, icon sidebar on the left, settings on the right.
 // Built on FLAlertLayer directly (no Popup template) so it does not depend on the Popup API of a given Geode version.
 #include "Common.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 
 using namespace geode::prelude;
@@ -28,7 +30,13 @@ namespace {
     }
 
     struct BoolRef { bool* v; bool restart; };
-    struct SliderRef { float* f; int* i; float lo, hi; CCLabelBMFont* label; char const* fmt; };
+    struct SliderRef {
+        float* f; int* i; float lo, hi;
+        CCLabelBMFont* label;      // value text (plain sliders)
+        TextInput* input;          // typed value (editable sliders)
+        Slider* slider;
+        char const* fmt;
+    };
 
     // ---------------------------------------------------------------- name prompt (New replay)
     class NamePrompt : public FLAlertLayer {
@@ -234,19 +242,47 @@ namespace {
             m_y -= 30.f;
         }
 
-        void addSlider(char const* label, float* f, int* i, float lo, float hi, char const* fmt) {
+        // editable = a small text box next to the slider where the exact value can be typed
+        void addSlider(char const* label, float* f, int* i, float lo, float hi, char const* fmt, bool editable = false) {
             text(label, 0.f, m_y, 0.38f, kText, m_content);
             auto sl = Slider::create(this, menu_selector(ToolkitMenu::onSlider), 0.55f);
             float cur = f ? *f : static_cast<float>(*i);
             sl->setValue((cur - lo) / (hi - lo));
-            sl->setPosition({contentW() - 78.f, m_y});
-            sl->getThumb()->setTag(static_cast<int>(m_sliders.size()));
+            sl->setPosition({contentW() - (editable ? 100.f : 78.f), m_y});
+            size_t idx = m_sliders.size();
+            sl->getThumb()->setTag(static_cast<int>(idx));
             m_content->addChild(sl);
             char buf[32];
             std::snprintf(buf, sizeof buf, fmt, cur);
-            auto val = text(buf, contentW() + 10.f, m_y, 0.32f, kAccent, m_content, 1.f);
-            m_sliders.push_back({f, i, lo, hi, val, fmt});
+            CCLabelBMFont* val = nullptr;
+            TextInput* input = nullptr;
+            if (editable) {
+                input = TextInput::create(60.f, "");
+                input->setScale(0.75f);
+                input->setPosition({contentW() - 12.f, m_y});
+                input->setFilter("0123456789.");
+                input->setMaxCharCount(7);
+                input->setString(buf);
+                input->setCallback([this, idx](std::string const& s) { onTyped(idx, s); });
+                m_content->addChild(input, 4);
+            } else {
+                val = text(buf, contentW() + 10.f, m_y, 0.32f, kAccent, m_content, 1.f);
+            }
+            m_sliders.push_back({f, i, lo, hi, val, input, sl, fmt});
             m_y -= 30.f;
+        }
+
+        void onTyped(size_t idx, std::string const& s) {
+            if (idx >= m_sliders.size()) return;
+            auto& r = m_sliders[idx];
+            char* end = nullptr;
+            float v = std::strtof(s.c_str(), &end);
+            if (end == s.c_str()) return;            // nothing parseable yet
+            v = std::clamp(v, r.lo, r.hi);
+            if (r.i) *r.i = static_cast<int>(std::round(v));
+            else *r.f = v;
+            r.slider->setValue((v - r.lo) / (r.hi - r.lo));
+            Cfg::get().save();
         }
 
         void onToggle(CCObject* s) {
@@ -264,7 +300,8 @@ namespace {
             char buf[32];
             if (r.i) { *r.i = static_cast<int>(std::round(val)); std::snprintf(buf, sizeof buf, r.fmt, static_cast<float>(*r.i)); }
             else { *r.f = std::round(val * 100.f) / 100.f; std::snprintf(buf, sizeof buf, r.fmt, *r.f); }
-            r.label->setString(buf);
+            if (r.label) r.label->setString(buf);
+            if (r.input) r.input->setString(buf);
             refreshButton();
         }
 
@@ -303,9 +340,9 @@ namespace {
                     addToggle("Noclip", c.noclip);
                     addToggle("Safe mode (no submit)", c.safeMode);
                     addToggle("Speedhack", c.speedhack);
-                    addSlider("Speed", &c.speed, nullptr, 0.1f, 5.f, "%.2fx");
+                    addSlider("Speed", &c.speed, nullptr, 0.01f, 10.f, "%.2f", true);
                     addToggle("Physical TPS (240+)", c.tpsBypass);
-                    addSlider("TPS", &c.tps, nullptr, 240.f, 1000.f, "%.0f");
+                    addSlider("TPS", &c.tps, nullptr, 240.f, 1000.f, "%.0f", true);
                     addToggle("Show TPS", c.showTps);
                     break;
                 case Hitbox:

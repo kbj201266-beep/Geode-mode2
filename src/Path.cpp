@@ -1,5 +1,8 @@
 // Pathfinder (EXPERIMENTAL): steps a dummy copy of the player forward twice - once holding, once released -
 // and draws both trajectories (green = hold, red = release).
+//
+// GD's physics works in "60 fps frame" units: one 240 TPS tick is dt = 0.25. Using real seconds (1/240) made
+// the dummy move 60x too slowly, which is why the path looked like it never appeared.
 #include "Common.hpp"
 
 using namespace geode::prelude;
@@ -7,6 +10,7 @@ using namespace geode::prelude;
 namespace kt::path {
 
 namespace {
+    constexpr float kTick = 0.25f;
     bool g_sim = false;
     bool g_simDead = false;
     PlayerObject* g_fake = nullptr;
@@ -15,18 +19,20 @@ namespace {
 
     std::vector<CCPoint> run(PlayLayer* pl, PlayerObject* real, bool hold, int steps) {
         std::vector<CCPoint> pts;
+        g_fake->copyAttributes(real);
         auto cp = PlayerCheckpoint::create();
         real->saveToCheckpoint(cp);
         g_fake->loadFromCheckpoint(cp);
+        g_fake->setVisible(false);
 
         g_sim = true;
         g_simDead = false;
         if (hold) g_fake->pushButton(PlayerButton::Jump);
-        float dt = 1.f / 240.f;
+        else g_fake->releaseButton(PlayerButton::Jump);
         pts.push_back(g_fake->getPosition());
         for (int i = 0; i < steps && !g_simDead; ++i) {
-            g_fake->update(dt);
-            pl->checkCollisions(g_fake, dt, false);
+            g_fake->update(kTick);
+            pl->checkCollisions(g_fake, kTick, false);
             pts.push_back(g_fake->getPosition());
         }
         g_sim = false;
@@ -62,10 +68,12 @@ void update(PlayLayer* pl) {
         reset();
         g_owner = pl;
         g_fake = PlayerObject::create(1, 1, pl, pl->m_objectLayer, false);
+        if (!g_fake) return;
         g_fake->retain();
+        g_fake->setVisible(false);
     }
 
-    int n = std::max(10, c.pathLen) * 2;   // path length is in frames at 60fps -> 4 physics steps each
+    int n = std::max(10, c.pathLen) * 4;   // length is in 60 fps frames -> 4 ticks each
     auto holdPts = run(pl, pl->m_player1, true, n);
     auto freePts = run(pl, pl->m_player1, false, n);
     auto drawLine = [&](std::vector<CCPoint> const& v, ccColor4F col) {

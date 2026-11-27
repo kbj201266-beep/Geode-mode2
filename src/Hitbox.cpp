@@ -1,11 +1,13 @@
 // Hitboxes, hitbox trail, and Hitborders (NaN style "accurate gaps").
 //
-// Hitborders: instead of drawing the player's box, every object is grown by the player's size, so only the
-// player's CENTER (yellow dot) matters:
+// Hitborders: every object is grown by the player's size, so only the player's CENTER (yellow dot) matters:
 //   red   = hazards grown by half the outer player box + solids grown by half the inner box  -> center in red = death
 //   blue  = solids grown by half the outer player box                                         -> passable / landable
 //   green = pads, orbs, portals grown by half the outer box
-// Overlapping boxes of one color are merged, so only the outline of the whole area is drawn.
+// All areas go into ONE grid: every cell gets exactly one color (red > green > blue), so areas never overlap
+// and outlines are drawn only where the color changes.
+//
+// Performance: objects are sorted by x once per level, so each frame only the objects near the player are visited.
 #include "Common.hpp"
 #include <algorithm>
 #include <cmath>
@@ -18,9 +20,54 @@ namespace kt::hitbox {
 
 namespace {
     constexpr float kInner = 0.3f;     // inner (solid-death) hitbox = 30% of the outer box
+    constexpr float kMargin = 400.f;   // extra x range so wide objects are not missed
     std::deque<CCRect> g_trail1, g_trail2;
     std::deque<CCPoint> g_center1, g_center2;
     constexpr char const* kNodeId = "kt-hitbox-node";
+
+    enum class Kind { Skip, Hazard, Solid, Special };
+    Kind kindOf(GameObject* o) {
+        switch (o->m_objectType) {
+            case GameObjectType::Hazard:
+            case GameObjectType::AnimatedHazard: return Kind::Hazard;
+            case GameObjectType::Solid:
+            case GameObjectType::Slope:
+            case GameObjectType::Breakable: return Kind::Solid;
+            case GameObjectType::Decoration:
+            case GameObjectType::Modifier:
+            case GameObjectType::CollisionObject:
+            case GameObjectType::EnterEffectObject:
+            case GameObjectType::Special: return Kind::Skip;
+            default: return Kind::Special;
+        }
+    }
+
+    // ---- object cache: only hitbox objects, sorted by x ----
+    PlayLayer* g_owner = nullptr;
+    unsigned g_count = 0;
+    std::vector<GameObject*> g_sorted;
+
+    void ensureCache(PlayLayer* pl) {
+        unsigned n = pl->m_objects ? pl->m_objects->count() : 0;
+        if (pl == g_owner && n == g_count) return;
+        g_owner = pl;
+        g_count = n;
+        g_sorted.clear();
+        if (!pl->m_objects) return;
+        g_sorted.reserve(n);
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            if (obj && kindOf(obj) != Kind::Skip) g_sorted.push_back(obj);
+        }
+        std::sort(g_sorted.begin(), g_sorted.end(),
+                  [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
+    }
+
+    template <class F>
+    void forNear(float x0, float x1, F&& f) {
+        auto it = std::lower_bound(g_sorted.begin(), g_sorted.end(), x0 - kMargin,
+                                   [](GameObject* o, float x) { return o->getPositionX() < x; });
+        for (; it != g_sorted.end() && (*it)->getPositionX() <= x1 + kMargin; ++it) f(*it);
+    }
 
     CCDrawNode* getNode(PlayLayer* pl) {
         auto parent = pl->m_objectLayer;
@@ -67,33 +114,20 @@ namespace {
         return {r.origin.x - hx, r.origin.y - hy, r.size.width + 2 * hx, r.size.height + 2 * hy};
     }
 
-    enum class Kind { Skip, Hazard, Solid, Special };
-    Kind kindOf(GameObject* o) {
-        switch (o->m_objectType) {
-            case GameObjectType::Hazard:
-            case GameObjectType::AnimatedHazard: return Kind::Hazard;
-            case GameObjectType::Solid:
-            case GameObjectType::Slope:
-            case GameObjectType::Breakable: return Kind::Solid;
-            case GameObjectType::Decoration:
-            case GameObjectType::Modifier:
-            case GameObjectType::CollisionObject:
-            case GameObjectType::EnterEffectObject:
-            case GameObjectType::Special: return Kind::Skip;
-            default: return Kind::Special;
-        }
-    }
+    struct Area {
+        CCRect r;
+        uint8_t level;      // 1 blue, 2 green, 3 red (higher wins)
+    };
 
-    // Draws the union of many rects: one merged fill and only the outer outline.
-    // Uses a compressed grid of all rect edges, so overlaps are never drawn twice.
-    void drawUnion(CCDrawNode* n, std::vector<CCRect> const& rects, ccColor4F fill, ccColor4F border, float bw) {
-        if (rects.empty()) return;
+    // One grid for all areas: every cell gets the highest level that covers it.
+    void drawAreas(CCDrawNode* n, std::vector<Area> const& areas, float bw, float fillA) {
+        if (areas.empty()) return;
         std::vector<float> xs, ys;
-        xs.reserve(rects.size() * 2);
-        ys.reserve(rects.size() * 2);
-        for (auto& r : rects) {
-            xs.push_back(r.getMinX()); xs.push_back(r.getMaxX());
-            ys.push_back(r.getMinY()); ys.push_back(r.getMaxY());
+        xs.reserve(areas.size() * 2);
+        ys.reserve(areas.size() * 2);
+        for (auto& a : areas) {
+            xs.push_back(a.r.getMinX()); xs.push_back(a.r.getMaxX());
+            ys.push_back(a.r.getMinY()); ys.push_back(a.r.getMaxY());
         }
         auto same = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
         std::sort(xs.begin(), xs.end());
@@ -106,37 +140,47 @@ namespace {
         auto idx = [](std::vector<float> const& v, float x) {
             return static_cast<int>(std::lower_bound(v.begin(), v.end(), x - 0.005f) - v.begin());
         };
-        std::vector<uint8_t> cov(static_cast<size_t>(nx) * ny, 0);
-        auto at = [&](int i, int j) -> uint8_t& { return cov[static_cast<size_t>(j) * nx + i]; };
-        for (auto& r : rects) {
-            int x0 = idx(xs, r.getMinX()), x1 = idx(xs, r.getMaxX());
-            int y0 = idx(ys, r.getMinY()), y1 = idx(ys, r.getMaxY());
+        std::vector<uint8_t> cell(static_cast<size_t>(nx) * ny, 0);
+        auto at = [&](int i, int j) -> uint8_t& { return cell[static_cast<size_t>(j) * nx + i]; };
+        for (auto& a : areas) {
+            int x0 = idx(xs, a.r.getMinX()), x1 = idx(xs, a.r.getMaxX());
+            int y0 = idx(ys, a.r.getMinY()), y1 = idx(ys, a.r.getMaxY());
             for (int j = y0; j < y1 && j < ny; ++j)
-                for (int i = x0; i < x1 && i < nx; ++i) at(i, j) = 1;
+                for (int i = x0; i < x1 && i < nx; ++i) at(i, j) = std::max(at(i, j), a.level);
         }
 
-        // fill: one quad per horizontal run of covered cells
+        ccColor4F fills[4] = {{0, 0, 0, 0},
+                              {0.05f, 0.12f, 0.95f, 1.f},             // blue (solid, no transparency like NaN's)
+                              {0.1f, 0.75f, 0.2f, fillA},             // green
+                              {0.55f, 0.05f, 0.05f, fillA}};          // red
+        ccColor4F borders[4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0.2f, 1.f, 0.3f, 1.f}, {1.f, 0.1f, 0.1f, 1.f}};
+
+        // fill: one quad per horizontal run of equal cells
         for (int j = 0; j < ny; ++j) {
             int i = 0;
             while (i < nx) {
-                if (!at(i, j)) { ++i; continue; }
+                uint8_t v = at(i, j);
                 int s = i;
-                while (i < nx && at(i, j)) ++i;
+                while (i < nx && at(i, j) == v) ++i;
+                if (!v) continue;
                 CCPoint q[4] = {{xs[s], ys[j]}, {xs[i], ys[j]}, {xs[i], ys[j + 1]}, {xs[s], ys[j + 1]}};
-                n->drawPolygon(q, 4, fill, 0.f, fill);
+                n->drawPolygon(q, 4, fills[v], 0.f, fills[v]);
             }
         }
 
-        // outline: every edge between a covered and an uncovered cell
+        // outline: only on the side of the higher level, so outlines never overlap other areas
         if (bw <= 0.f) return;
         float rad = bw / 2.f;
+        auto val = [&](int i, int j) -> uint8_t { return (i < 0 || j < 0 || i >= nx || j >= ny) ? 0 : at(i, j); };
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
-                if (!at(i, j)) continue;
-                if (i == 0 || !at(i - 1, j)) n->drawSegment({xs[i], ys[j]}, {xs[i], ys[j + 1]}, rad, border);
-                if (i == nx - 1 || !at(i + 1, j)) n->drawSegment({xs[i + 1], ys[j]}, {xs[i + 1], ys[j + 1]}, rad, border);
-                if (j == 0 || !at(i, j - 1)) n->drawSegment({xs[i], ys[j]}, {xs[i + 1], ys[j]}, rad, border);
-                if (j == ny - 1 || !at(i, j + 1)) n->drawSegment({xs[i], ys[j + 1]}, {xs[i + 1], ys[j + 1]}, rad, border);
+                uint8_t v = at(i, j);
+                if (v < 2) continue;              // blue has no outline
+                auto& col = borders[v];
+                if (val(i - 1, j) < v) n->drawSegment({xs[i], ys[j]}, {xs[i], ys[j + 1]}, rad, col);
+                if (val(i + 1, j) < v) n->drawSegment({xs[i + 1], ys[j]}, {xs[i + 1], ys[j + 1]}, rad, col);
+                if (val(i, j - 1) < v) n->drawSegment({xs[i], ys[j]}, {xs[i + 1], ys[j]}, rad, col);
+                if (val(i, j + 1) < v) n->drawSegment({xs[i], ys[j + 1]}, {xs[i + 1], ys[j + 1]}, rad, col);
             }
         }
     }
@@ -162,24 +206,24 @@ namespace {
         float ox = outer.size.width / 2, oy = outer.size.height / 2;
         float ix = inner.size.width / 2, iy = inner.size.height / 2;
 
-        std::vector<CCRect> red, blue, green;
+        std::vector<Area> areas;
         float range = CCDirector::get()->getWinSize().width * 1.2f;
         float px = pl->m_player1->getPositionX();
-        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
-            if (!obj || std::abs(obj->getPositionX() - px) > range) continue;
-            auto k = kindOf(obj);
-            if (k == Kind::Skip) continue;
+        forNear(px - range, px + range, [&](GameObject* obj) {
             auto r = objRect(obj);
-            if (k == Kind::Hazard) red.push_back(grow(r, ox, oy));
-            else if (k == Kind::Solid) { blue.push_back(grow(r, ox, oy)); red.push_back(grow(r, ix, iy)); }
-            else green.push_back(grow(r, ox, oy));
-        }
+            switch (kindOf(obj)) {
+                case Kind::Hazard: areas.push_back({grow(r, ox, oy), 3}); break;
+                case Kind::Solid:
+                    areas.push_back({grow(r, ox, oy), 1});
+                    areas.push_back({grow(r, ix, iy), 3});
+                    break;
+                case Kind::Special: areas.push_back({grow(r, ox, oy), 2}); break;
+                default: break;
+            }
+        });
 
-        float bw = Cfg::get().hitBorder;
         float fa = std::clamp(Cfg::get().hitFill * 3.f, 0.15f, 0.85f);   // fill opacity slider also drives this view
-        drawUnion(n, blue, {0.05f, 0.12f, 0.95f, 1.f}, {0.05f, 0.12f, 0.95f, 1.f}, 0.f);
-        drawUnion(n, green, {0.1f, 0.75f, 0.2f, fa}, {0.2f, 1.f, 0.3f, 1.f}, bw);
-        drawUnion(n, red, {0.55f, 0.05f, 0.05f, fa}, {1.f, 0.1f, 0.1f, 1.f}, bw);
+        drawAreas(n, areas, Cfg::get().hitBorder, fa);
 
         pushCenter(g_center1, pl->m_player1);
         drawCenter(n, g_center1, pl->m_player1);
@@ -229,6 +273,8 @@ namespace {
 }
 
 void reset() {
+    g_owner = nullptr;       // rebuild the object cache (new level, or objects moved back on reset)
+    g_sorted.clear();
     g_trail1.clear();
     g_trail2.clear();
     g_center1.clear();
@@ -241,6 +287,7 @@ void update(PlayLayer* pl) {
     node->clear();
     if (!c.hitboxes && !c.hitboxTrail && !c.hitborders) return;
     if (path::simulating() || !pl->m_player1) return;
+    ensureCache(pl);
 
     if (c.hitborders) {          // NaN style view replaces the normal hitboxes
         drawHitborders(node, pl);
@@ -255,13 +302,9 @@ void update(PlayLayer* pl) {
     }
     if (!c.hitboxes) return;
 
-    // only objects near the player are drawn (cheap culling)
     float range = CCDirector::get()->getWinSize().width * 1.2f;
     float px = pl->m_player1->getPositionX();
-    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
-        if (!obj || std::abs(obj->getPositionX() - px) > range) continue;
-        drawObject(node, obj);
-    }
+    forNear(px - range, px + range, [&](GameObject* obj) { drawObject(node, obj); });
     if (c.playerHitbox) {
         drawPlayer(node, pl->m_player1);
         if (pl->m_gameState.m_isDualMode) drawPlayer(node, pl->m_player2);

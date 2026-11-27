@@ -1,16 +1,18 @@
 // Window frame counter + replay files.
 //
 // Modes (like a bot menu):  Disabled / Record / Playback
-//  - Record:   restart the level once; from then on every click is stored. Play it in PRACTICE MODE: when you
-//              die and respawn at a checkpoint, the replay is cut back to the checkpoint frame and recording
-//              continues (nothing is reset). Finish the level to end the recording.
-//  - Playback: the replay is played back by the mod. "Ignore Inputs" blocks your own clicks meanwhile.
+//  - Record:   choose it and resume - the level restarts by itself and every click is stored. Practice mode is
+//              fine: when you respawn at a checkpoint, the replay is cut back to that frame and continues.
+//              Finish the level to end the recording.
+//  - Playback: the replay is played back by the mod, on exactly the frames it was recorded on.
+//              "Ignore Inputs" blocks your own clicks meanwhile.
 //  - Count:    1) one normal run of the replay from the level start. It records the player's path, where every
 //                 click happened, and saves a checkpoint a few frames before every click.
 //                 If the replay dies somewhere, the clicks before that point are still counted.
 //              2) for every click: load the checkpoint before it, shift the click earlier / later by 1,2,3...
 //                 frames, and check whether the player survives until the NEXT click. No level restarts, so
 //                 the attempt counter stays at 1 and it is fast. window = early + late + 1.
+//              3) when done, the level restarts from the beginning.
 // Replays are text files in <save dir>/replays/<name>.ktr:
 //   line 1 inputs "frame:down:p1;"   line 2 results "frame:early:late:counted;"
 //   line 3 click positions "x,y;"     line 4 path "x,y;"
@@ -63,6 +65,8 @@ namespace {
         bool armed = false, recording = false;
         Phase phase = Phase::Idle;
         bool needReset = false, trialDead = false, completed = false, injecting = false;
+        bool restartAfter = false;           // put the player back at the level start on the next frame
+        int stepFrame = 0;                   // frame number of the physics step being processed right now
 
         std::vector<Input> trial;            // what is injected (macro for playback, shifted macro for counting)
         size_t cursor = 0;
@@ -263,6 +267,9 @@ namespace {
     void stop(std::string const& why) {
         s.phase = Phase::Idle;       // the counting speed ends with the phase (see speedFactor)
         s.needReset = false;
+        // The last trial left the player somewhere in the level (often past the end, where GD never
+        // completes again because the counter swallowed it). Restart so the level can be played normally.
+        s.restartAfter = true;
         s.msg = why;
         s.lines.clear();
         s.trialPath.clear();
@@ -326,8 +333,12 @@ namespace {
 
 void onLevelEnter(PlayLayer*) {
     if (active()) stop("Stopped");
+    s.restartAfter = false;      // a fresh level is already at the start
     s.armed = s.recording = false;
-    if (s.mode == Mode::Record) s.mode = Mode::Disabled;
+    if (s.mode == Mode::Record) {  // Record chosen before entering: start recording from this level's start
+        s.armed = true;
+        s.restartAfter = true;
+    }
     releaseCps();
     s.lines.clear();
     s.trialPath.clear();
@@ -342,13 +353,16 @@ bool filterInput(bool, int, bool) {
     return true;
 }
 
-void onInput(GJBaseGameLayer* l, bool down, int button, bool p1) {
-    if (s.recording && !s.injecting && button == 1) s.macro.push_back({frameOf(l), down, p1});
+// Recording and playback use the SAME frame number: the one taken at the start of the physics step
+// (beforeStep). Playback presses at that same point of the same step, so the bot repeats the run exactly.
+void onInput(GJBaseGameLayer*, bool down, int button, bool p1) {
+    if (s.recording && !s.injecting && button == 1) s.macro.push_back({s.stepFrame, down, p1});
 }
 
 void beforeStep(GJBaseGameLayer* l) {
-    if (active() && s.needReset) return;      // the old run is still going until the reset happens
     int f = frameOf(l);
+    s.stepFrame = f;
+    if (active() && s.needReset) return;      // the old run is still going until the reset happens
     bool baseline = s.phase == Phase::Baseline;
 
     if (baseline) {
@@ -438,6 +452,11 @@ void onReset(PlayLayer* pl) {
 }
 
 void update(PlayLayer* pl) {
+    if (s.restartAfter && !active()) {
+        s.restartAfter = false;
+        pl->resetLevelFromStart();
+        return;
+    }
     if (!active()) return;
     if (s.needReset) {
         s.needReset = false;
@@ -461,8 +480,10 @@ void setMode(Mode m) {
     s.mode = m;
     s.recording = s.armed = false;
     if (m == Mode::Record) {
+        // The level restarts from the beginning by itself as soon as you resume; recording starts there.
         s.armed = true;
-        s.msg = "Restart the level to start recording (practice mode + checkpoints are fine)";
+        s.restartAfter = PlayLayer::get() != nullptr;
+        s.msg = "Resume the game - the level restarts and recording begins";
     } else if (m == Mode::Playback) {
         syncTrial();
         auto pl = PlayLayer::get();
@@ -489,6 +510,7 @@ void startCounting() {
     s.lastPathFrame = -1;
     s.limit = static_cast<int>(s.clicks.size());
     s.deathFrame = 0;
+    s.restartAfter = false;
     s.phase = Phase::Baseline;
     makeTrial(-1, 0);
     s.needReset = true;
@@ -502,6 +524,7 @@ float speedFactor() { return active() ? kCountSpeed : 1.f; }
 void cancelCounting() { if (active()) stop("Stopped"); }
 
 bool isRecording() { return s.recording || s.armed; }
+bool botPlaying() { return s.mode == Mode::Playback && !s.macro.empty(); }
 bool isCounting() { return active(); }
 
 std::string countingText() {
@@ -514,7 +537,7 @@ std::string countingText() {
 }
 
 std::string statusText() {
-    if (s.armed) return "Waiting - restart the level to start recording";
+    if (s.armed) return "Record ready - resume, the level restarts and recording begins";
     if (s.recording) return "Recording... " + std::to_string(s.macro.size()) + " inputs";
     if (active()) {
         auto t = countingText();

@@ -30,6 +30,7 @@
 #include "Common.hpp"
 #include "PlayerState.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <sstream>
@@ -334,6 +335,48 @@ namespace {
         (void)utils::file::writeString(replayPath(s.names[s.sel]), encode());
     }
 
+    // No replay chosen with "New": make one named after the level, so a recording is never lost.
+    void ensureReplayFile() {
+        refreshList();
+        if (hasSelection()) return;
+        std::string base = "replay";
+        if (auto pl = PlayLayer::get()) {
+            if (pl->m_level) base = std::string(pl->m_level->m_levelName);
+        }
+        std::string name;
+        for (char ch : base) {
+            if (std::isalnum(static_cast<unsigned char>(ch)) || ch == ' ' || ch == '_' || ch == '-') name += ch;
+        }
+        if (name.empty()) name = "replay";
+        if (name.size() > 18) name.resize(18);
+        std::string unique = name;
+        for (int i = 2; std::find(s.names.begin(), s.names.end(), unique) != s.names.end(); ++i)
+            unique = name + " " + std::to_string(i);
+        (void)utils::file::writeString(replayPath(unique), "");
+        Mod::get()->setSavedValue<std::string>("replayName", unique);
+        refreshList();
+    }
+
+    // Ends a recording and ALWAYS saves it - when the level is completed, but also when you quit the level,
+    // switch the mode, or never finished (practice runs usually never reach 100%). Before, only a completed
+    // level with a replay created by "New" was saved, so many recordings were simply lost.
+    bool g_forceArm = false;     // the restart done by Record mode itself starts the recording, whatever frame
+    void finishRecording() {
+        if (!s.recording) { s.armed = false; return; }
+        s.recording = false;
+        s.armed = false;
+        if (s.macro.empty()) { s.msg = "Nothing recorded"; return; }
+        buildClicks();
+        buildCues();
+        s.path.clear();
+        ensureReplayFile();
+        autosave();
+        syncTrial();
+        ++s.version;
+        s.msg = "Recorded " + std::to_string(s.clicks.size()) + " clicks - saved as \"" +
+                (hasSelection() ? s.names[s.sel] : std::string("?")) + "\"";
+    }
+
     // ---------- trial construction ----------
     // click = -1 builds the untouched macro (baseline). Returns false if the shift is impossible
     // (it would reorder inputs, or the release would come before its press / after the next click).
@@ -562,6 +605,7 @@ void onLevelEnter(PlayLayer*) {
 void onLevelExit() {
     if (active()) stop("Stopped");
     s.restartAfter = false;
+    finishRecording();           // quitting the level saves what was recorded so far
     s.armed = s.recording = false;
     releaseCps();
     s.lines.clear();
@@ -664,14 +708,7 @@ bool onDeath(PlayLayer* pl, GameObject* obj) {
 
 bool onComplete(PlayLayer*) {
     if (s.recording) {
-        s.recording = false;
-        s.armed = false;
-        buildClicks();
-        buildCues();
-        s.path.clear();
-        autosave();
-        ++s.version;
-        s.msg = "Recorded " + std::to_string(s.clicks.size()) + " clicks" + (hasSelection() ? " (saved)" : "");
+        finishRecording();
         return false;       // let the real completion happen
     }
     if (active()) { s.completed = true; return true; }
@@ -693,7 +730,9 @@ void onReset(PlayLayer* pl) {
         }
     }
     int f = frameOf(pl);
-    if (s.armed && f <= 1) {
+    // the restart Record mode does itself always starts the recording (a start position or practice mode can
+    // make the first frame bigger than 1, and then the recording never started before)
+    if (s.armed && (f <= 1 || g_forceArm)) {
         s.armed = false;
         s.recording = true;
         s.macro.clear();
@@ -714,7 +753,9 @@ void onReset(PlayLayer* pl) {
 void update(PlayLayer* pl) {
     if (s.restartAfter && !active()) {
         s.restartAfter = false;
+        g_forceArm = s.armed;
         pl->resetLevelFromStart();
+        g_forceArm = false;
         return;
     }
     if (!active()) return;
@@ -755,6 +796,7 @@ Mode mode() { return s.mode; }
 
 void setMode(Mode m) {
     if (active()) return;
+    finishRecording();           // switching away from Record keeps what was recorded
     s.mode = m;
     s.recording = s.armed = false;
     if (m == Mode::Record) {

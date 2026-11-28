@@ -435,7 +435,11 @@ namespace {
     void scheduleNext() {
         while (s.k < s.limit) {
             if (makeTrial(s.k, s.off, s.dir)) { s.needReset = true; return; }
-            nextSide();     // impossible shift counts as a fail
+            // impossible shift (would cross another input) counts as the end of that side
+            if (s.dir != Control && s.k < static_cast<int>(s.notes.size()))
+                s.notes[s.k] += std::string(s.notes[s.k].empty() ? "" : ", ") + (s.dir <= DownLate ? "" : "rel") +
+                                (s.off > 0 ? "+" : "") + std::to_string(s.off) + " blocked";
+            nextSide();
         }
         complete();
     }
@@ -443,11 +447,19 @@ namespace {
     void finish(bool ok) {
         if (s.phase == Phase::Baseline) {
             if (!ok) {
-                // The replay dies somewhere: still count every click whose next click comes before that point.
+                // The unchanged replay itself dies at deathFrame (a macro that does not finish the level, e.g. one
+                // recorded only up to some point). Nothing after that point can be survived, so:
+                //  - every click before the death is counted,
+                //  - no click may demand surviving past that frame. Before, the last clicks asked for "survive
+                //    until the next click / 120 ticks", which lay behind the end of the replay - every shift
+                //    "died" there and those clicks always showed 1.
+                int d = s.deathFrame;
                 int usable = 0;
-                while (usable < static_cast<int>(s.clicks.size()) && s.clicks[usable].checkFrame < s.deathFrame) ++usable;
+                while (usable < static_cast<int>(s.clicks.size()) && s.macro[s.clicks[usable].down].frame < d - 1)
+                    ++usable;
                 if (usable == 0) { stop("The replay dies before its first click - record a longer run"); return; }
                 s.limit = usable;
+                for (auto& c : s.clicks) c.checkFrame = std::min(c.checkFrame, d);
             }
             s.phase = Phase::Trial;
             s.k = 0; s.dir = Control; s.off = 0; s.calibIdx = 0;
@@ -488,6 +500,14 @@ namespace {
             s.lastTrial = std::string(s.dir <= DownLate ? "click " : "release ") + (s.off > 0 ? "+" : "") +
                           std::to_string(s.off) + (ok ? " ok" : " died f" + std::to_string(s.lastDeathFrame) +
                           " obj " + std::to_string(s.lastDeathId));
+            // Copy Info: where each side of the window ended (relative to the press), to check the counter
+            if (!ok) {
+                int press = s.macro[s.clicks[s.k].down].frame;
+                s.notes[s.k] += std::string(s.notes[s.k].empty() ? "" : ", ") + (s.dir <= DownLate ? "" : "rel") +
+                                (s.off > 0 ? "+" : "") + std::to_string(s.off) + " died +" +
+                                std::to_string(s.lastDeathFrame - press) + " obj " + std::to_string(s.lastDeathId) +
+                                " (need +" + std::to_string(s.clicks[s.k].checkFrame - press) + ")";
+            }
             if (!s.trialPath.empty()) {
                 s.lines.push_back({s.trialPath, ok});
                 if (s.lines.size() > kMaxLines) s.lines.erase(s.lines.begin());

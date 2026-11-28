@@ -7,7 +7,7 @@
 // All areas go into ONE grid: every cell gets exactly one color (red > green > blue), so areas never overlap
 // and outlines are drawn only where the color changes.
 //
-// Performance: objects are sorted by x once per level, so each frame only the objects near the player are visited.
+// Performance: objects are sorted by x once per level, so each frame only the objects on screen are visited.
 #include "Common.hpp"
 #include <algorithm>
 #include <cmath>
@@ -62,22 +62,40 @@ namespace {
                   [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
     }
 
+    CCRect objRect(GameObject* o);
+
+    // only objects whose box really reaches into [x0, x1] (the visible part of the level)
     template <class F>
     void forNear(float x0, float x1, F&& f) {
         auto it = std::lower_bound(g_sorted.begin(), g_sorted.end(), x0 - kMargin,
                                    [](GameObject* o, float x) { return o->getPositionX() < x; });
-        for (; it != g_sorted.end() && (*it)->getPositionX() <= x1 + kMargin; ++it) f(*it);
+        for (; it != g_sorted.end() && (*it)->getPositionX() <= x1 + kMargin; ++it) {
+            auto r = objRect(*it);
+            if (r.getMaxX() < x0 || r.getMinX() > x1) continue;
+            f(*it);
+        }
     }
 
+    // visible x range: the player sits about a third into the screen
+    void viewRange(PlayLayer* pl, float& x0, float& x1) {
+        float w = CCDirector::get()->getWinSize().width;
+        float px = pl->m_player1->getPositionX();
+        x0 = px - w * 0.6f;
+        x1 = px + w * 1.0f;
+    }
+
+    CCDrawNode* g_node = nullptr;     // kept as a pointer: no search through the level's children every frame
     CCDrawNode* getNode(PlayLayer* pl) {
-        auto parent = pl->m_objectLayer;
-        auto node = static_cast<CCDrawNode*>(parent->getChildByID(kNodeId));
-        if (!node) {
-            node = CCDrawNode::create();
-            node->setID(kNodeId);
-            parent->addChild(node, 9999);
+        if (!g_node) {
+            auto parent = pl->m_objectLayer;
+            g_node = static_cast<CCDrawNode*>(parent->getChildByID(kNodeId));
+            if (!g_node) {
+                g_node = CCDrawNode::create();
+                g_node->setID(kNodeId);
+                parent->addChild(g_node, 9999);
+            }
         }
-        return node;
+        return g_node;
     }
 
     void poly(CCDrawNode* n, std::vector<CCPoint> const& v, ccColor3B c, bool fill, float alpha = 1.f) {
@@ -248,19 +266,36 @@ namespace {
         }
         for (auto& o : open) flush(o, ny);
 
-        // outline: only on the side of the higher level, so outlines never overlap other areas
+        // outline: drawn where the color changes, in the color of the higher area (blue has none).
+        // Neighbouring edge pieces of the same color are joined into one long line, so even a big level only
+        // needs a few lines instead of one per cell.
         if (bw <= 0.f) return;
         float rad = bw / 2.f;
         auto val = [&](int i, int j) -> uint8_t { return (i < 0 || j < 0 || i >= nx || j >= ny) ? 0 : at(i, j); };
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                uint8_t v = at(i, j);
-                if (v < 2) continue;              // blue has no outline
-                auto& col = borders[v];
-                if (val(i - 1, j) < v) n->drawSegment({xs[i], ys[j]}, {xs[i], ys[j + 1]}, rad, col);
-                if (val(i + 1, j) < v) n->drawSegment({xs[i + 1], ys[j]}, {xs[i + 1], ys[j + 1]}, rad, col);
-                if (val(i, j - 1) < v) n->drawSegment({xs[i], ys[j]}, {xs[i + 1], ys[j]}, rad, col);
-                if (val(i, j + 1) < v) n->drawSegment({xs[i], ys[j + 1]}, {xs[i + 1], ys[j + 1]}, rad, col);
+        auto edge = [](uint8_t a, uint8_t b) -> uint8_t {
+            uint8_t hi = std::max(a, b);
+            return (hi >= 2 && a != b) ? hi : 0;
+        };
+        // vertical lines at every x boundary
+        for (int i = 0; i <= nx; ++i) {
+            int j = 0;
+            while (j < ny) {
+                uint8_t e = edge(val(i - 1, j), val(i, j));
+                if (!e) { ++j; continue; }
+                int s = j;
+                while (j < ny && edge(val(i - 1, j), val(i, j)) == e) ++j;
+                n->drawSegment({xs[i], ys[s]}, {xs[i], ys[j]}, rad, borders[e]);
+            }
+        }
+        // horizontal lines at every y boundary
+        for (int j = 0; j <= ny; ++j) {
+            int i = 0;
+            while (i < nx) {
+                uint8_t e = edge(val(i, j - 1), val(i, j));
+                if (!e) { ++i; continue; }
+                int s = i;
+                while (i < nx && edge(val(i, j - 1), val(i, j)) == e) ++i;
+                n->drawSegment({xs[s], ys[j]}, {xs[i], ys[j]}, rad, borders[e]);
             }
         }
     }
@@ -290,9 +325,9 @@ namespace {
         // their exact grown shape as a polygon instead (blue ones under the grid, red/green ones on top).
         std::vector<Area> areas;
         std::vector<std::vector<CCPoint>> blueP, greenP, redP;
-        float range = CCDirector::get()->getWinSize().width * 1.2f;
-        float px = pl->m_player1->getPositionX();
-        forNear(px - range, px + range, [&](GameObject* obj) {
+        float x0, x1;
+        viewRange(pl, x0, x1);
+        forNear(x0, x1, [&](GameObject* obj) {
             auto kind = kindOf(obj);
             if (kind == Kind::Solid && obj->m_objectType == GameObjectType::Slope && obj->m_slopeIsHazard) kind = Kind::Hazard;
             if (needsPolygon(obj)) {
@@ -378,9 +413,18 @@ namespace {
     }
 }
 
-void reset() {
-    g_owner = nullptr;       // rebuild the object cache (new level, or objects moved back on reset)
+// New level: the object cache and the draw node belong to the old one.
+void enter() {
+    g_owner = nullptr;
+    g_count = 0;
     g_sorted.clear();
+    g_node = nullptr;
+    reset();
+}
+
+// Every death / restart: only the trails. The object cache stays (sorting the whole level again on every
+// death caused a hitch each time).
+void reset() {
     g_trail1.clear();
     g_trail2.clear();
     g_center1.clear();
@@ -389,10 +433,16 @@ void reset() {
 
 void update(PlayLayer* pl) {
     auto& c = Cfg::get();
+    static bool s_drawn = false;
+    if (!c.hitboxes && !c.hitboxTrail && !c.hitborders) {
+        if (s_drawn && g_node) g_node->clear();     // nothing on: no work at all after the first clear
+        s_drawn = false;
+        return;
+    }
+    if (path::simulating() || !pl->m_player1) return;
     auto node = getNode(pl);
     node->clear();
-    if (!c.hitboxes && !c.hitboxTrail && !c.hitborders) return;
-    if (path::simulating() || !pl->m_player1) return;
+    s_drawn = true;
     ensureCache(pl);
 
     // Hitborders and hitboxes are independent: turn both on to get the NaN look (merged danger area underneath,
@@ -407,9 +457,9 @@ void update(PlayLayer* pl) {
     }
     if (!c.hitboxes) return;
 
-    float range = CCDirector::get()->getWinSize().width * 1.2f;
-    float px = pl->m_player1->getPositionX();
-    forNear(px - range, px + range, [&](GameObject* obj) { drawObject(node, obj); });
+    float x0, x1;
+    viewRange(pl, x0, x1);
+    forNear(x0, x1, [&](GameObject* obj) { drawObject(node, obj); });
     if (c.playerHitbox) {
         drawPlayer(node, pl->m_player1);
         if (pl->m_gameState.m_isDualMode) drawPlayer(node, pl->m_player2);

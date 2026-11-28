@@ -56,7 +56,7 @@ class $modify(KtPlayLayer, PlayLayer) {
             kt::path::onSimDeath(obj);
             return;
         }
-        if (kt::counter::onDeath(this)) return;
+        if (kt::counter::onDeath(this, obj)) return;
         if (Cfg::get().noclip) {
             kt::noclip::onHit();
             return;

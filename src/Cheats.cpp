@@ -135,6 +135,26 @@ namespace {
     }
 }
 
+// Called by the PlayLayer::addObject hook while the level loads. In layout mode, decoration (no hitbox) and
+// the triggers that change colors / opacity are never added to the level at all - they are gone, not just
+// hidden, so they cost nothing and cannot recolor anything.
+bool skipObject(GameObject* o) {
+    if (!Cfg::get().layoutMode || !o) return false;
+    switch (o->m_objectID) {
+        case 899:                                           // color trigger
+        case 29: case 30: case 104: case 105: case 221:     // old color triggers (BG, G, line, obj, col 1)
+        case 717: case 718: case 743: case 744:             // old color triggers (col 2-4, 3DL)
+        case 900: case 915:                                 // G2 / line color triggers
+        case 1006:                                          // pulse trigger
+        case 1007:                                          // alpha trigger (would make blocks invisible)
+        case 2903:                                          // gradient trigger
+        case 3029: case 3030: case 3031:                    // BG / G / MG change triggers
+            return true;
+        default: break;
+    }
+    return o->m_objectType == GameObjectType::Decoration && !o->m_isTrigger;
+}
+
 // Called by the PlayLayer::updateColor hook (every color change of the level goes through it).
 // Returns false to ignore the change.
 bool filterColor(int colorID, ccColor3B& color, float& fadeTime, int& copyID) {

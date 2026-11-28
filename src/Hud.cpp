@@ -36,6 +36,13 @@ void attach(PlayLayer* pl) {
     pl->m_uiLayer->addChild(g_flash, 100);
 }
 
+void detach() {
+    g_info = nullptr;
+    g_flash = nullptr;
+    g_owner = nullptr;
+    g_infoText.clear();
+}
+
 void update(PlayLayer* pl) {
     if (!g_info || pl != g_owner) return;
     auto& c = Cfg::get();

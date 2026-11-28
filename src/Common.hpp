@@ -96,7 +96,7 @@ namespace counter {
 
     Mode mode();
     void setMode(Mode);
-    void startCounting();
+    std::string startCounting();   // returns what happens ("Counting 5 clicks..." or why it cannot start)
     void cancelCounting();
     void abortCounting(std::string const& why);   // stop counting and show why
     float speedFactor();         // always 1 (counting runs many steps per frame instead, see Hooks.cpp)

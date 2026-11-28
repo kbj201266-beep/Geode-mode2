@@ -169,6 +169,14 @@ bool filterColor(int colorID, ccColor3B& color, float& fadeTime, int& copyID) {
     return true;
 }
 
+// A new level can be created at the same memory address as the previous one, so "is this the same level"
+// cannot be judged by the pointer alone: forget everything whenever a level is left or entered.
+void reset() {
+    g_owner = nullptr;
+    g_applied = false;
+    g_orig.clear();
+}
+
 void apply(PlayLayer* pl) {
     if (g_owner != pl) {
         g_owner = pl;

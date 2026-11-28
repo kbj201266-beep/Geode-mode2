@@ -19,6 +19,7 @@ namespace path {
     bool simulating();         // true while the dummy is being stepped
     void onSimDeath(GameObject* obj);
     void reset();
+    void forget();             // the level is already gone: drop the dummy without touching it
 }
 
 namespace noclip {
@@ -84,6 +85,9 @@ namespace counter {
     bool filterInput(bool down, int button, bool p1);              // false = swallow the real input
     void onInput(GJBaseGameLayer*, bool down, int button, bool p1);
     void beforeStep(GJBaseGameLayer*);                             // inject macro / show cues
+    void afterStep();                                              // the physics step is over
+    void onStoreCheckpoint(PlayLayer*, CheckpointObject*);         // practice checkpoint placed
+    void onLoadCheckpoint(PlayLayer*, CheckpointObject*);          // practice respawn (before onReset)
     bool onDeath(PlayLayer*, GameObject* obj);                     // true = swallow the death
     bool onComplete(PlayLayer*);                                   // true = swallow level complete
     void onReset(PlayLayer*);                                      // after a reset AND after a checkpoint load

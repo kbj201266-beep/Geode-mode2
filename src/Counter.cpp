@@ -120,6 +120,10 @@ namespace {
         std::map<CheckpointObject*, std::pair<PState, PState>> practice;
         CheckpointObject* practiceCp = nullptr;   // checkpoint loaded by the respawn being processed right now
         std::string levelName;               // name of the level being played (new recordings are named after it)
+        // Recording keeps the attempt that got FURTHEST. Before, a death in normal mode started the recording
+        // over and only the last attempt was saved - usually a short one with a single click.
+        std::vector<Input> best;
+        int bestFrame = -1;
 
         std::vector<Input> trial;            // what is injected (macro for playback, shifted macro for counting)
         size_t cursor = 0;
@@ -346,44 +350,65 @@ namespace {
         (void)utils::file::writeString(replayPath(s.names[s.sel]), encode());
     }
 
-    // No replay chosen with "New": make one named after the level, so a recording is never lost.
-    void ensureReplayFile() {
-        refreshList();
-        if (hasSelection()) return;
+    // A recording is saved under the level's name (one replay per level) and that replay gets selected, so the
+    // window counter always counts what you just recorded.
+    void selectLevelReplay() {
         // the level name is remembered on entering (the level may already be going away here)
         std::string base = s.levelName.empty() ? std::string("replay") : s.levelName;
         std::string name;
         for (char ch : base) {
             if (std::isalnum(static_cast<unsigned char>(ch)) || ch == ' ' || ch == '_' || ch == '-') name += ch;
         }
+        while (!name.empty() && name.back() == ' ') name.pop_back();
         if (name.empty()) name = "replay";
-        if (name.size() > 18) name.resize(18);
-        std::string unique = name;
-        for (int i = 2; std::find(s.names.begin(), s.names.end(), unique) != s.names.end(); ++i)
-            unique = name + " " + std::to_string(i);
-        (void)utils::file::writeString(replayPath(unique), "");
-        Mod::get()->setSavedValue<std::string>("replayName", unique);
+        if (name.size() > 24) name.resize(24);
         refreshList();
+        if (std::find(s.names.begin(), s.names.end(), name) == s.names.end())
+            (void)utils::file::writeString(replayPath(name), "");
+        Mod::get()->setSavedValue<std::string>("replayName", name);
+        refreshList();
+        for (int i = 0; i < static_cast<int>(s.names.size()); ++i) if (s.names[i] == name) s.sel = i;
     }
 
     // Ends a recording and ALWAYS saves it - when the level is completed, but also when you quit the level,
-    // switch the mode, or never finished (practice runs usually never reach 100%). Before, only a completed
-    // level with a replay created by "New" was saved, so many recordings were simply lost.
+    // switch the mode, press Count Macro, or never finished (practice runs usually never reach 100%).
+    // Not completed: the attempt that got furthest is saved. Record mode switches itself off afterwards, so a
+    // later visit to the level never starts a new recording that overwrites this one.
     bool g_forceArm = false;     // the restart done by Record mode itself starts the recording, whatever frame
-    void finishRecording() {
+    void finishRecording(bool completed = false) {
         if (!s.recording) { s.armed = false; return; }
         s.recording = false;
         s.armed = false;
-        if (s.macro.empty()) { s.msg = "Nothing recorded"; return; }
+        if (s.mode == Mode::Record) s.mode = Mode::Disabled;
+        if (!completed && s.bestFrame > s.stepFrame && !s.best.empty()) s.macro = s.best;
+        s.best.clear();
+        s.bestFrame = -1;
+        if (s.macro.empty()) {
+            s.msg = "Nothing recorded";
+            log::info("[counter] recording ended: nothing recorded");
+            return;
+        }
         buildClicks();
         buildCues();
         s.path.clear();
-        ensureReplayFile();
+        selectLevelReplay();
         autosave();
         syncTrial();
         ++s.version;
         s.msg = "Recorded " + std::to_string(s.clicks.size()) + " clicks - saved as \"" +
                 (hasSelection() ? s.names[s.sel] : std::string("?")) + "\"";
+        log::info("[counter] recording saved: {} inputs, {} clicks, completed={}, file \"{}\"", s.macro.size(),
+                  s.clicks.size(), completed, hasSelection() ? s.names[s.sel] : std::string("?"));
+    }
+
+    // reads the selected replay file into memory; false if there is none / it cannot be read
+    bool loadSelected() {
+        refreshList();
+        if (!hasSelection()) return false;
+        auto r = utils::file::readString(replayPath(s.names[s.sel]));
+        if (!r.isOk()) return false;
+        decode(r.unwrap());
+        return true;
     }
 
     // ---------- trial construction ----------
@@ -438,6 +463,8 @@ namespace {
             case DownLate:
                 r.counted = true;          // the click window is final: it appears on screen now
                 ++s.version;
+                log::info("[counter] click {} (frame {}): window {}f (-{} / +{})", s.k + 1, r.frame, r.window(),
+                          r.early, r.late);
                 if (s.clicks[s.k].rel >= 0 && s.k < static_cast<int>(s.relMatters.size()) && s.relMatters[s.k]) {
                     s.dir = RelEarly;
                     s.off = -1;
@@ -455,6 +482,9 @@ namespace {
     }
 
     void stop(std::string const& why) {
+        // every end of a count is written to the Geode log and shown on screen, so it never ends silently
+        log::info("[counter] stopped: {}", why);
+        Notification::create(why.c_str(), NotificationIcon::Info, 3.f)->show();
         s.phase = Phase::Idle;       // the counting speed ends with the phase (see speedFactor)
         s.needReset = false;
         // The last trial left the player somewhere in the level (often past the end, where GD never
@@ -509,15 +539,23 @@ namespace {
                 int usable = 0;
                 while (usable < static_cast<int>(s.clicks.size()) && s.macro[s.clicks[usable].down].frame < d - 1)
                     ++usable;
+                log::info("[counter] baseline: the replay dies at frame {} (obj {}), {} of {} clicks before it",
+                          d, s.lastDeathId, usable, s.clicks.size());
                 if (usable == 0) { stop("The replay dies before its first click - record a longer run"); return; }
                 s.limit = usable;
                 for (auto& c : s.clicks) c.checkFrame = std::min(c.checkFrame, d);
+            } else {
+                log::info("[counter] baseline: the replay survives, {} clicks to count", s.clicks.size());
             }
+            int made = 0;
+            for (auto cp : s.cps) if (cp) ++made;
+            log::info("[counter] baseline: {} of {} checkpoints made", made, s.cps.size());
             s.phase = Phase::Trial;
             s.k = 0; s.dir = Control; s.off = 0; s.calibIdx = 0;
         } else if (s.dir == Control) {
             // control run: the UNCHANGED replay must survive until the next click, otherwise nothing measured
             // for this click could be trusted
+            int kk = s.k;
             auto& st = s.cpOk[s.k];
             std::string died = " (died f" + std::to_string(s.lastDeathFrame) + " obj " + std::to_string(s.lastDeathId) + ")";
             if (ok) {
@@ -548,6 +586,9 @@ namespace {
                 advanceClick();
             }
             s.lastTrial = "check " + std::string(ok ? "ok" : "FAILED" + died);
+            log::info("[counter] click {} control run ({}): {}", kk + 1,
+                      st == 1 ? "checkpoint" : st == 2 ? "restart" : st == 0 ? "checkpoint failed -> restart"
+                      : st == 3 ? "not reproducible" : "checkpoint, next offset", s.lastTrial);
         } else {
             s.lastTrial = std::string(s.dir <= DownLate ? "click " : "release ") + (s.off > 0 ? "+" : "") +
                           std::to_string(s.off) + (ok ? " ok" : " died f" + std::to_string(s.lastDeathFrame) +
@@ -750,7 +791,7 @@ bool onDeath(PlayLayer* pl, GameObject* obj) {
 
 bool onComplete(PlayLayer*) {
     if (s.recording) {
-        finishRecording();
+        finishRecording(true);
         return false;       // let the real completion happen
     }
     if (active()) { s.completed = true; return true; }
@@ -786,8 +827,16 @@ void onReset(PlayLayer* pl) {
         s.armed = false;
         s.recording = true;
         s.macro.clear();
+        s.best.clear();
+        s.bestFrame = -1;
         s.msg = "Recording...";
+        log::info("[counter] recording started at frame {}", f);
     } else if (s.recording) {
+        // the attempt that just ended is remembered if it got further than every attempt before
+        if (s.stepFrame > s.bestFrame && !s.macro.empty()) {
+            s.best = s.macro;
+            s.bestFrame = s.stepFrame;
+        }
         // respawn (checkpoint or restart): forget everything after this frame, keep the rest
         s.macro.erase(std::remove_if(s.macro.begin(), s.macro.end(), [&](Input const& i) { return i.frame >= f; }),
                       s.macro.end());
@@ -855,6 +904,7 @@ void setMode(Mode m) {
         s.restartAfter = PlayLayer::get() != nullptr;
         s.msg = "Resume the game - the level restarts and recording begins";
     } else if (m == Mode::Playback) {
+        if (s.macro.empty()) loadSelected();     // after a restart of the game nothing is in memory yet
         syncTrial();
         auto pl = PlayLayer::get();
         syncCursor(pl ? frameOf(pl) : 0);
@@ -864,10 +914,26 @@ void setMode(Mode m) {
     }
 }
 
-void startCounting() {
-    if (s.macro.empty()) { s.msg = "No replay - record or load one first"; return; }
-    s.armed = s.recording = false;
+// Count Macro. Before, it silently did nothing when the replay was not in memory (after restarting the game,
+// or when Record mode had started a new, still empty recording) - while the menu said "counting runs
+// automatically". Now: a running recording is saved first, then the selected replay is read from its file,
+// and the returned message says exactly what happens.
+std::string startCounting() {
+    if (active()) return "Already counting";
+    finishRecording();                   // Record mode: save what was recorded (the furthest attempt)
+    if (s.mode != Mode::Disabled) s.mode = Mode::Disabled;    // no Record / Playback while counting
+    if (!loadSelected() && s.macro.empty()) {
+        s.msg = "No replay - Replay tab: Record, play, then Count";
+        log::info("[counter] count: no replay");
+        return s.msg;
+    }
     buildClicks();
+    if (s.clicks.empty()) {
+        s.msg = "\"" + currentName() + "\" has no clicks - record a longer run";
+        log::info("[counter] count: replay \"{}\" has {} inputs but no clicks", currentName(), s.macro.size());
+        return s.msg;
+    }
+    s.armed = s.recording = false;
     s.cues.clear();
     s.cueCursor = 0;
     s.lastCue = -1;
@@ -913,6 +979,9 @@ void startCounting() {
     s.t0 = std::chrono::steady_clock::now();
     s.msg = "Counting";
     ++s.version;
+    log::info("[counter] count started: \"{}\", {} inputs, {} clicks", currentName(), s.macro.size(), nc);
+    return "Counting " + std::to_string(nc) + " clicks of \"" + currentName() +
+           "\" - close the menu and resume";
 }
 
 // counting no longer speeds up time (that only made each frame take bigger steps); Hooks.cpp instead runs
@@ -1058,9 +1127,7 @@ std::string saveReplay() {
 std::string loadReplay() {
     refreshList();
     if (!hasSelection()) return "No replay selected";
-    auto r = utils::file::readString(replayPath(s.names[s.sel]));
-    if (!r.isOk()) return "Could not read the file";
-    decode(r.unwrap());
+    if (!loadSelected()) return "Could not read the file";
     if (auto pl = PlayLayer::get()) syncCues(frameOf(pl));
     s.msg = "Loaded " + s.names[s.sel];
     return "Loaded \"" + s.names[s.sel] + "\" (" + std::to_string(s.clicks.size()) + " clicks)";

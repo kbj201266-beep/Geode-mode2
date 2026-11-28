@@ -135,10 +135,11 @@ namespace {
     }
 }
 
-// Called by the PlayLayer::addObject hook while the level loads. In layout mode, decoration (no hitbox) and
-// the triggers that change colors / opacity are never added to the level at all - they are gone, not just
-// hidden, so they cost nothing and cannot recolor anything.
-bool skipObject(GameObject* o) {
+// Called by the trigger hooks (Hooks.cpp) whenever a trigger fires. In layout mode the triggers that change
+// colors / opacity do nothing - they stay in the level, they just have no effect.
+// (They used to be left out of the level while it loaded. GD still kept pointers to the left-out objects -
+// groups, linked objects, portals - and big custom levels crashed right when they were entered.)
+bool blockTrigger(GameObject* o) {
     if (!Cfg::get().layoutMode || !o) return false;
     switch (o->m_objectID) {
         case 899:                                           // color trigger
@@ -150,9 +151,8 @@ bool skipObject(GameObject* o) {
         case 2903:                                          // gradient trigger
         case 3029: case 3030: case 3031:                    // BG / G / MG change triggers
             return true;
-        default: break;
+        default: return false;
     }
-    return o->m_objectType == GameObjectType::Decoration && !o->m_isTrigger;
 }
 
 // Called by the PlayLayer::updateColor hook (every color change of the level goes through it).

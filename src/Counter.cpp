@@ -735,7 +735,12 @@ bool onDeath(PlayLayer* pl, GameObject* obj) {
     if (!active()) return false;
     if (s.reached || s.needReset) return true;     // already decided: deaths after the check frame do not count
     if (!s.trialDead) {
-        s.deathFrame = frameOf(pl);
+        // The death belongs to the physics step that was just processed (stepFrame). The game's frame counter
+        // has already moved on by then: before, the death was stamped one frame too late, so "survive until the
+        // frame where the replay dies" could never be reached - the unchanged replay itself "failed", every click
+        // became NOT REPRODUCIBLE (all 0) or every shift died (window 1).
+        s.deathFrame = s.stepFrame;
+        (void)pl;
         s.lastDeathFrame = s.deathFrame;
         s.lastDeathId = obj ? obj->m_objectID : -1;
     }
@@ -915,6 +920,7 @@ void startCounting() {
 float speedFactor() { return 1.f; }
 
 void cancelCounting() { if (active()) stop("Stopped"); }
+void abortCounting(std::string const& why) { if (active()) stop(why); }
 
 bool isRecording() { return s.recording || s.armed; }
 bool botPlaying() { return s.mode == Mode::Playback && !s.macro.empty(); }

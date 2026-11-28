@@ -2,13 +2,20 @@
 //
 // Hook order: the hooks the window counter / bot depend on run FIRST, before other mods (Silicate, QOLMod,
 // other bots and counters hook the same functions). Otherwise, for example, another mod's noclip swallowed the
-// death before the counter ever saw it, or another practice fix overwrote the player after our respawn - and the
-// counter could not count on Windows, where those mods are usually installed.
+// death before the counter ever saw it, or another practice fix overwrote the player after our respawn.
+//
+// Counting safety: while counting, deaths are swallowed and your own clicks are blocked (the counter clicks
+// and decides itself). That is only allowed while the counter is REALLY driving the level. Before, the level
+// could lose its "ready" mark while counting was on: nothing was counted, but deaths were still swallowed -
+// the player just ran through every object. Now the ready mark repairs itself, and if counting still cannot
+// run it is stopped right away (with the reason in the counter tab) instead of turning into noclip.
 #include "Common.hpp"
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/EffectGameObject.hpp>
+#include <Geode/modify/GradientTriggerObject.hpp>
 
 #include <chrono>
 
@@ -18,14 +25,30 @@ namespace {
     // true while the window counter runs many game steps inside one rendered frame: the overlays are then
     // drawn once after the burst instead of after every step
     bool g_fastForward = false;
-    // true between setupHasCompleted and leaving the level. Nothing of the mod draws or simulates outside of it:
-    // the game already runs frames while a level is still loading, and touching the previous level's nodes then
-    // was a crash when entering a level.
+    struct FastForward {
+        FastForward() { g_fastForward = true; }
+        ~FastForward() { g_fastForward = false; }     // never stays on, whatever happens inside the burst
+    };
+
+    // the level that finished loading and has not been left yet
+    PlayLayer* g_setup = nullptr;
+    // g_setup while it is on screen. Nothing of the mod draws or simulates outside of it: the game already runs
+    // frames while a level is still loading, and touching the previous level's nodes then was a crash.
     PlayLayer* g_ready = nullptr;
-    // the level is still alive but another scene was put on top of it (it comes back when that one closes).
-    // Before, this was treated like quitting: everything stopped and never came back - the hitboxes and the
-    // yellow center line froze until the level was re-entered.
+    // the level is still alive but another scene was put on top of it (it comes back when that one closes)
     PlayLayer* g_away = nullptr;
+
+    int g_steps = 0;          // physics steps run so far (to see whether a counting burst moved the game at all)
+    int g_idleBursts = 0;     // counting bursts in a row that ran no physics step
+
+    // The ready mark repairs itself: a level that finished loading, was never left and is on screen is ready.
+    PlayLayer* ready(PlayLayer* pl) {
+        if (pl && g_ready != pl && g_setup == pl && pl->isRunning()) {
+            g_ready = pl;
+            g_away = nullptr;
+        }
+        return g_ready;
+    }
 
     // everything that holds pointers into a level lets go of them while that level still exists
     void leaveLevel() {
@@ -37,6 +60,7 @@ namespace {
         kt::layout::reset();
         g_ready = nullptr;
         g_away = nullptr;
+        g_setup = nullptr;
     }
 
     // Lives as a child of the PlayLayer and dies with it. If a level is destroyed without onQuit / onExit
@@ -57,7 +81,7 @@ namespace {
             return nullptr;
         }
         ~LevelGuard() override {
-            if (!m_owner || (g_ready != m_owner && g_away != m_owner)) return;
+            if (!m_owner || (g_ready != m_owner && g_away != m_owner && g_setup != m_owner)) return;
             kt::counter::onLevelExit();
             kt::path::forget();       // never touch the dummy: its level is being destroyed right now
             kt::hitbox::enter();
@@ -66,6 +90,7 @@ namespace {
             kt::layout::reset();
             g_ready = nullptr;
             g_away = nullptr;
+            g_setup = nullptr;
         }
     };
 }
@@ -88,12 +113,6 @@ class $modify(KtPlayLayer, PlayLayer) {
                                callerObject, unk1, unk2);
     }
 
-    // layout mode: decoration and color / pulse / alpha triggers are left out of the level while it loads
-    void addObject(GameObject* obj) {
-        if (kt::layout::skipObject(obj)) return;
-        PlayLayer::addObject(obj);
-    }
-
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
         kt::hitbox::enter();
@@ -105,20 +124,22 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::layout::apply(this);
         kt::counter::onLevelEnter(this);
         if (auto guard = LevelGuard::create(this)) this->addChild(guard);
+        g_setup = this;
         g_ready = this;
         g_away = nullptr;
+        g_idleBursts = 0;
     }
 
     void onQuit() {
         kt::counter::cancelCounting();     // never leave the game running at counting speed
-        if (g_ready == this || g_away == this) leaveLevel();
+        if (g_setup == this || g_ready == this || g_away == this) leaveLevel();
         PlayLayer::onQuit();
     }
 
     // Leaving the level any other way than the pause menu (another mod replacing the scene...) cleans up.
     // A scene pushed ON TOP of the level (it stays alive underneath) only pauses the mod until it comes back.
     void onExit() {
-        if (g_ready == this) {
+        if (g_ready == this || g_setup == this) {
             if (CCDirector::get()->isSendCleanupToScene()) {
                 leaveLevel();
             } else {
@@ -140,7 +161,7 @@ class $modify(KtPlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        if (g_ready != this) return;        // level still loading / already left: touch nothing
+        if (ready(this) != this) return;    // level still loading / already left: touch nothing
         if (g_fastForward) return;          // counting burst: drawn once afterwards
         kt::hitbox::update(this);
         kt::path::update(this);
@@ -160,6 +181,9 @@ class $modify(KtPlayLayer, PlayLayer) {
             kt::path::onSimDeath(obj);
             return;
         }
+        // counting that is not really running must never act like noclip
+        if (kt::counter::isCounting() && ready(this) != this)
+            kt::counter::abortCounting("Stopped - the level was not ready for counting, try again");
         if (kt::counter::onDeath(this, obj)) return;
         if (Cfg::get().noclip) {
             kt::noclip::onHit();
@@ -210,6 +234,7 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        ++g_steps;
         if (!isHalfTick) {
             auto& c = Cfg::get();
             if (c.showTps) kt::speed::onStep();     // only measured when it is shown
@@ -237,15 +262,29 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         bool bypass = c.tpsBypass && c.tps >= 241.f;
         float dt = bypass ? 1.f / c.tps : 1.f / 60.f;       // 1 tick (custom TPS) or 4 ticks (240 TPS) per call
         auto t0 = std::chrono::steady_clock::now();
-        g_fastForward = true;
-        for (int i = 0; i < 4000; ++i) {
-            kt::counter::update(pl);                         // finish the run / respawn for the next one
-            if (!kt::counter::isCounting()) break;
-            if (kt::counter::pendingReset()) continue;
-            GJBaseGameLayer::update(dt);
-            if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(14)) break;
+        int stepsBefore = g_steps;
+        {
+            FastForward ff;
+            for (int i = 0; i < 4000; ++i) {
+                kt::counter::update(pl);                     // finish the run / respawn for the next one
+                if (!kt::counter::isCounting()) break;
+                if (kt::counter::pendingReset()) continue;
+                GJBaseGameLayer::update(dt);
+                if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(14)) break;
+            }
         }
-        g_fastForward = false;
+        // the game must actually step while counting; if another mod stops it, say so instead of hanging
+        if (kt::counter::isCounting()) {
+            if (g_steps == stepsBefore) {
+                if (++g_idleBursts > 120) {
+                    g_idleBursts = 0;
+                    kt::counter::abortCounting("Stopped - the game ran no physics steps (another mod's bot / "
+                                               "frame stepper on?)");
+                }
+            } else {
+                g_idleBursts = 0;
+            }
+        }
         kt::hitbox::update(pl);
         kt::view::update(pl);
         kt::hud::update(pl);
@@ -256,9 +295,13 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         auto& c = Cfg::get();
         auto pl = PlayLayer::get();
         bool mine = pl && static_cast<GJBaseGameLayer*>(pl) == this;
-        if (mine && pl == g_ready && kt::counter::isCounting() && !g_fastForward) {
-            countBurst(pl);
-            return;
+        if (mine && kt::counter::isCounting() && !g_fastForward) {
+            if (ready(pl) == pl) {
+                countBurst(pl);
+                return;
+            }
+            // counting without a ready level would only block clicks and deaths: stop it
+            kt::counter::abortCounting("Stopped - the level was not ready for counting, try again");
         }
         if (!c.tpsBypass || c.tps < 241.f || !mine) {
             GJBaseGameLayer::update(dt);
@@ -267,6 +310,21 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         float step = 0.f;
         int n = kt::speed::planSteps(dt, step);
         for (int i = 0; i < n; ++i) GJBaseGameLayer::update(step);
+    }
+};
+
+// Layout mode: color / pulse / alpha triggers stay in the level but do nothing when they fire.
+class $modify(KtEffectObject, EffectGameObject) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, std::vector<int> const* remapKeys) {
+        if (kt::layout::blockTrigger(this)) return;
+        EffectGameObject::triggerObject(layer, uniqueID, remapKeys);
+    }
+};
+
+class $modify(KtGradientObject, GradientTriggerObject) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, std::vector<int> const* remapKeys) {
+        if (kt::layout::blockTrigger(this)) return;
+        GradientTriggerObject::triggerObject(layer, uniqueID, remapKeys);
     }
 };
 

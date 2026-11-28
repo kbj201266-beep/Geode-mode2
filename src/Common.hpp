@@ -80,7 +80,7 @@ namespace counter {
     bool filterInput(bool down, int button, bool p1);              // false = swallow the real input
     void onInput(GJBaseGameLayer*, bool down, int button, bool p1);
     void beforeStep(GJBaseGameLayer*);                             // inject macro / show cues
-    bool onDeath(PlayLayer*);                                      // true = swallow the death
+    bool onDeath(PlayLayer*, GameObject* obj);                     // true = swallow the death
     bool onComplete(PlayLayer*);                                   // true = swallow level complete
     void onReset(PlayLayer*);                                      // after a reset AND after a checkpoint load
     void update(PlayLayer*);                                       // state machine (finish a run / respawn)

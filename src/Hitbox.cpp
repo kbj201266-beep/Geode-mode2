@@ -446,10 +446,11 @@ namespace {
     }
 
     // Trail like a swept band: every two following boxes are joined by their convex hull, so the trail is one
-    // solid ribbon. Red = outer hitbox (with a dark red edge), blue = inner hitbox on top.
+    // solid ribbon. Red = outer hitbox, blue = inner hitbox on top. One box per physics tick, so it shows
+    // exactly what the game computed at the current TPS.
     void drawTrail(CCDrawNode* n, std::deque<TrailBox> const& t) {
         if (t.empty()) return;
-        ccColor4F edge{0.45f, 0.f, 0.f, 1.f}, red{1.f, 0.f, 0.f, 1.f}, blue{0.f, 0.f, 0.85f, 1.f};
+        ccColor4F red{1.f, 0.f, 0.f, 1.f}, blue{0.f, 0.f, 0.85f, 1.f};
         auto sweep = [&](bool outer, float g, ccColor4F col) {
             for (size_t i = 0; i < t.size(); ++i) {
                 CCRect a = outer ? t[i].outer : t[i].inner;
@@ -460,7 +461,6 @@ namespace {
                 fillPoly(n, hullOf(std::move(pts)), col, 0.f, col);
             }
         };
-        sweep(true, 1.2f, edge);
         sweep(true, 0.f, red);
         sweep(false, 0.f, blue);
     }
@@ -469,8 +469,17 @@ namespace {
         if (!p) return;
         auto outer = p->getObjectRect();
         t.push_back({outer, innerOf(outer)});
-        while (static_cast<int>(t.size()) > std::max(1, Cfg::get().trailLen)) t.pop_front();
+        // the length setting is in 60 fps frames: 4 ticks each at 240 TPS
+        while (static_cast<int>(t.size()) > std::clamp(Cfg::get().trailLen * 4, 4, 2000)) t.pop_front();
     }
+}
+
+// Called once per physics tick (Hooks.cpp): the trail gets one box per tick.
+void onTick(PlayLayer* pl) {
+    if (!Cfg::get().hitboxTrail || !pl->m_player1) return;
+    push(g_trail1, pl->m_player1);
+    if (pl->m_gameState.m_isDualMode) push(g_trail2, pl->m_player2);
+    else g_trail2.clear();
 }
 
 // New level: the object cache and the draw node belong to the old one.
@@ -510,8 +519,6 @@ void update(PlayLayer* pl) {
     if (c.hitborders) drawHitborders(node, pl);
 
     if (c.hitboxTrail) {
-        push(g_trail1, pl->m_player1);
-        push(g_trail2, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr);
         drawTrail(node, g_trail1);
         drawTrail(node, g_trail2);
     }

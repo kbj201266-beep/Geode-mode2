@@ -98,14 +98,20 @@ void sync(PlayLayer* pl) {
 }
 }
 
-// Layout mode: background and ground stay, decoration hidden, every object with a hitbox painted white, no glow.
+// Layout mode:
+//  - background and ground are the default blue and stay that way (color triggers are ignored),
+//  - decoration is hidden,
+//  - every object with a hitbox is white - also hidden / invisible blocks - and has no glow.
 // The object loop only runs when the setting actually changed (or a new level opened), never on every death.
-// Turning it off restores the original state.
+// Turning it off restores the objects; the colors come back with the next restart.
 namespace kt::layout {
 namespace {
     constexpr int kWhite = 1011;
+    constexpr ccColor3B kBg{40, 125, 255};       // GD's default background blue
+    constexpr ccColor3B kGround{0, 102, 255};    // GD's default ground blue
     struct Orig {
         bool hide;
+        bool invisible;
         int base;
         int detail;
         bool glow;
@@ -129,6 +135,20 @@ namespace {
     }
 }
 
+// Called by the PlayLayer::updateColor hook (every color change of the level goes through it).
+// Returns false to ignore the change.
+bool filterColor(int colorID, ccColor3B& color, float& fadeTime, int& copyID) {
+    if (!Cfg::get().layoutMode) return true;
+    switch (colorID) {
+        case 1000: color = kBg; break;                 // background
+        case 1001: case 1009: color = kGround; break;  // ground 1 / ground 2
+        default: return false;                         // every other color trigger does nothing
+    }
+    fadeTime = 0.f;
+    copyID = 0;
+    return true;
+}
+
 void apply(PlayLayer* pl) {
     if (g_owner != pl) {
         g_owner = pl;
@@ -136,7 +156,15 @@ void apply(PlayLayer* pl) {
         g_applied = false;
     }
     bool any = Cfg::get().layoutMode;
-    if (any == g_applied) return;          // nothing changed: no work at all
+    if (any) {
+        // set background and ground to blue right away (cheap: three channels)
+        for (int id : {1000, 1001, 1009}) {
+            ccColor3B col = id == 1000 ? kBg : kGround;
+            ccHSVValue hsv{};
+            pl->updateColor(col, 0.f, id, false, 1.f, hsv, 0, false, nullptr, 0, 0);
+        }
+    }
+    if (any == g_applied) return;          // objects already done: no work at all
     if (!pl->m_objects) return;
     bool hideDeco = any, white = any, noGlow = any;
 
@@ -146,13 +174,15 @@ void apply(PlayLayer* pl) {
         if (!deco && !solid) continue;
         if (!g_orig.count(obj)) {
             if (!any) continue;
-            g_orig[obj] = {obj->m_isHide, obj->m_baseColor ? obj->m_baseColor->m_colorID : 0,
+            g_orig[obj] = {obj->m_isHide, obj->m_isInvisibleBlock,
+                           obj->m_baseColor ? obj->m_baseColor->m_colorID : 0,
                            obj->m_detailColor ? obj->m_detailColor->m_colorID : 0,
                            obj->m_glowSprite ? obj->m_glowSprite->isVisible() : false};
         }
         auto& o = g_orig[obj];
         // back to the original first, then apply whatever is on now
         obj->m_isHide = o.hide;
+        obj->m_isInvisibleBlock = o.invisible;
         if (obj->m_baseColor) obj->m_baseColor->m_colorID = o.base;
         if (obj->m_detailColor) obj->m_detailColor->m_colorID = o.detail;
         if (obj->m_glowSprite) obj->m_glowSprite->setVisible(o.glow);
@@ -162,6 +192,9 @@ void apply(PlayLayer* pl) {
             obj->setVisible(false);
         }
         if (white && solid) {
+            // white channel 1011 is always fully opaque, so blocks that were see-through become visible too
+            obj->m_isHide = false;
+            obj->m_isInvisibleBlock = false;
             if (obj->m_baseColor) obj->m_baseColor->m_colorID = kWhite;
             if (obj->m_detailColor) obj->m_detailColor->m_colorID = kWhite;
         }

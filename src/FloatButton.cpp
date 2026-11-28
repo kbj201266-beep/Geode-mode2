@@ -15,7 +15,7 @@ CCSprite* modSprite(char const* name) {
 }
 
 namespace {
-    constexpr char const* kId = "kimyy.gd-toolkit/float-button";
+    constexpr char const* kId = "kbjgd.gd-toolkit/float-button";
 
     class FloatButton : public CCNode, public CCTouchDelegate {
     public:

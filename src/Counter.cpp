@@ -73,7 +73,13 @@ namespace {
         std::vector<CheckpointObject*> cps;  // retained checkpoint a few frames before each click
         std::vector<int> cpFrame;            // planned frame of each checkpoint
         std::vector<int> cpAt;               // frame it was really taken on
-        std::vector<signed char> cpOk;       // -1 not tested yet, 1 checkpoint replays exactly, 0 broken (use restarts)
+        // per click: -1 not tested, 1 checkpoint replays exactly, 0 checkpoint broken -> testing a full restart,
+        //            2 full restart verified, 3 not reproducible at all (skipped, shown as "?")
+        std::vector<signed char> cpOk;
+        int broken = 0;                      // clicks that could not be reproduced
+        std::vector<std::string> notes;      // per click: how it was counted (Copy Info)
+        int lastDeathFrame = -1, lastDeathId = -1;
+        std::string lastTrial;               // shown under the counting text
         size_t nextCp = 0;
         int frameShift = 0;                  // added to the game's frame counter after a checkpoint respawn
         int pendingCp = -1;                  // frame of the checkpoint that is being loaded right now
@@ -337,7 +343,7 @@ namespace {
             if (c.rel >= 0) s.trial[c.rel].frame += off;
             if (s.trial[c.down].frame >= c.checkFrame) return false;
             // the respawn point is before the earliest press we try; never move a press in front of it
-            if (s.cpOk[click] != 0 && s.trial[c.down].frame < s.cpFrame[click]) return false;
+            if (s.cpOk[click] == 1 && s.trial[c.down].frame < s.cpFrame[click]) return false;
         }
         for (size_t i = 0; i < s.trial.size(); ++i) {
             if (s.trial[i].frame < 1) return false;
@@ -398,9 +404,11 @@ namespace {
             buildCues();
             autosave();
         }
-        int fb = s.fallbacks;
-        stop("Done - " + std::to_string(s.limit) + " clicks counted" +
-             (fb ? " (" + std::to_string(fb) + " with restarts)" : std::string()));
+        int fb = s.fallbacks, br = s.broken;
+        std::string extra;
+        if (fb) extra += ", " + std::to_string(fb) + " via restart";
+        if (br) extra += ", " + std::to_string(br) + " not reproducible";
+        stop("Done - " + std::to_string(s.limit - br) + " clicks counted" + extra);
         FMODAudioEngine::sharedEngine()->playEffect(std::string("ding_9.wav"_spr), 1.f, 1.f, 1.f);
     }
 
@@ -424,24 +432,42 @@ namespace {
             s.phase = Phase::Trial;
             s.k = 0; s.dir = Control; s.off = 0; s.calibIdx = 0;
         } else if (s.dir == Control) {
-            // control run: the unchanged replay from this click's checkpoint must survive
+            // control run: the UNCHANGED replay must survive until the next click, otherwise nothing measured
+            // for this click could be trusted
+            auto& st = s.cpOk[s.k];
+            std::string died = " (died f" + std::to_string(s.lastDeathFrame) + " obj " + std::to_string(s.lastDeathId) + ")";
             if (ok) {
-                if (s.cpOk[s.k] != 0) {
-                    s.cpOk[s.k] = 1;
+                if (st == -1) {
+                    st = 1;
                     s.bestShift = calibShift();
+                    s.notes[s.k] = "checkpoint";
+                } else {
+                    st = 2;
+                    s.notes[s.k] = "restart";
                 }
                 s.dir = DownEarly;
                 s.off = -1;
-            } else if (s.cpOk[s.k] != 0 && s.calibIdx + 1 < 3) {
+            } else if (st == -1 && s.calibIdx + 1 < 3) {
                 ++s.calibIdx;                // try the checkpoint again with another frame offset
+            } else if (st == -1) {
+                // the checkpoint cannot reproduce the run: verify a full restart instead (slow but exact)
+                st = 0;
+                ++s.fallbacks;
+                s.notes[s.k] = "checkpoint failed" + died;
             } else {
-                // the checkpoint cannot reproduce the run: count this click with full restarts (slow but exact)
-                if (s.cpOk[s.k] != 0) ++s.fallbacks;
-                s.cpOk[s.k] = 0;
-                s.dir = DownEarly;
-                s.off = -1;
+                // even a full restart does not reproduce the recording here: skip this click
+                st = 3;
+                ++s.broken;
+                s.notes[s.k] = "NOT REPRODUCIBLE" + died;
+                s.results[s.k].counted = false;
+                s.results[s.k].relCounted = false;
+                advanceClick();
             }
+            s.lastTrial = "check " + std::string(ok ? "ok" : "FAILED" + died);
         } else {
+            s.lastTrial = std::string(s.dir <= DownLate ? "click " : "release ") + (s.off > 0 ? "+" : "") +
+                          std::to_string(s.off) + (ok ? " ok" : " died f" + std::to_string(s.lastDeathFrame) +
+                          " obj " + std::to_string(s.lastDeathId));
             if (!s.trialPath.empty()) {
                 s.lines.push_back({s.trialPath, ok});
                 if (s.lines.size() > kMaxLines) s.lines.erase(s.lines.begin());
@@ -567,10 +593,14 @@ void beforeStep(GJBaseGameLayer* l) {
     }
 }
 
-bool onDeath(PlayLayer* pl) {
+bool onDeath(PlayLayer* pl, GameObject* obj) {
     if (!active()) return false;
     if (s.reached || s.needReset) return true;     // already decided: deaths after the check frame do not count
-    if (!s.trialDead) s.deathFrame = frameOf(pl);
+    if (!s.trialDead) {
+        s.deathFrame = frameOf(pl);
+        s.lastDeathFrame = s.deathFrame;
+        s.lastDeathId = obj ? obj->m_objectID : -1;
+    }
     s.trialDead = true;
     return true;
 }
@@ -627,7 +657,8 @@ void update(PlayLayer* pl) {
     if (!active()) return;
     if (s.needReset) {
         s.needReset = false;
-        bool useCp = s.phase == Phase::Trial && s.k < static_cast<int>(s.cps.size()) && s.cps[s.k] && s.cpOk[s.k] != 0;
+        bool useCp = s.phase == Phase::Trial && s.k < static_cast<int>(s.cps.size()) && s.cps[s.k] &&
+                     (s.cpOk[s.k] == -1 || s.cpOk[s.k] == 1);
         if (useCp) {
             // a real practice respawn at OUR checkpoint: resetLevel resets the whole level (orbs, triggers,
             // moving objects...) and then loads the last checkpoint - exactly what happens when you die
@@ -702,6 +733,9 @@ void startCounting() {
         s.cpFrame[i] = cpf;
     }
     s.fallbacks = 0;
+    s.broken = 0;
+    s.notes.assign(nc, "");
+    s.lastTrial.clear();
     s.bestShift = 0;
     s.calibIdx = 0;
     s.reached = false;
@@ -738,7 +772,13 @@ std::string countingText() {
     if (s.phase == Phase::Baseline) return "Preparing.. 0/" + std::to_string(n) + "\nETA ~?";
     float el = std::chrono::duration<float>(std::chrono::steady_clock::now() - s.t0).count();
     std::string e = s.k > 0 ? eta(el / s.k * (n - s.k)) : std::string("~?");
-    return "Counting.. " + std::to_string(s.k) + "/" + std::to_string(n) + "\nETA " + e;
+    std::string how;
+    if (s.k < static_cast<int>(s.cpOk.size())) {
+        int st = s.cpOk[s.k];
+        how = st == 1 ? "checkpoint" : st == -1 ? "checking" : "restart";
+    }
+    return "Counting.. " + std::to_string(s.k) + "/" + std::to_string(n) + "  (" + how + ")\nETA " + e +
+           "\n" + s.lastTrial;
 }
 
 std::string statusText() {
@@ -786,12 +826,15 @@ std::string summaryText() {
 
 std::string infoText() {
     std::ostringstream o;
-    o << "Replay: " << currentName() << "\n" << summaryText() << "\nAll clicks:\n";
+    o << "Replay: " << currentName() << "\n" << s.msg << "\n" << summaryText() << "\nAll clicks:\n";
     for (size_t i = 0; i < s.results.size(); ++i) {
         auto& r = s.results[i];
-        if (!r.counted) continue;
-        o << "#" << (i + 1) << "  frame " << r.frame << "  click " << r.window() << "f (-" << r.early << " / +" << r.late << ")";
+        std::string note = i < s.notes.size() ? s.notes[i] : "";
+        if (!r.counted && note.empty()) continue;
+        o << "#" << (i + 1) << "  frame " << r.frame;
+        if (r.counted) o << "  click " << r.window() << "f (-" << r.early << " / +" << r.late << ")";
         if (r.relCounted) o << "  release " << r.relWindow() << "f (-" << r.relEarly << " / +" << r.relLate << ")";
+        if (!note.empty()) o << "  [" << note << "]";
         o << "\n";
     }
     return o.str();

@@ -1,4 +1,4 @@
-// noclip, speedhack + physical TPS, practice music sync, layout mode, ultra low detail mode.
+// noclip, speedhack + physical TPS, practice music sync, layout mode.
 #include "Common.hpp"
 #include <algorithm>
 #include <chrono>
@@ -98,10 +98,9 @@ void sync(PlayLayer* pl) {
 }
 }
 
-// Layout mode:          background and ground stay, decoration hidden, every object with a hitbox painted white.
-// Ultra low detail mode: decoration hidden, all glow removed, the middle background layer hidden - the level
-//                        keeps its colors but draws far less, so it stops lagging.
-// Applied once per level reset (no per-frame hooks). Turning a mode off restores the original state.
+// Layout mode: background and ground stay, decoration hidden, every object with a hitbox painted white, no glow.
+// The object loop only runs when the setting actually changed (or a new level opened), never on every death.
+// Turning it off restores the original state.
 namespace kt::layout {
 namespace {
     constexpr int kWhite = 1011;
@@ -136,14 +135,10 @@ void apply(PlayLayer* pl) {
         g_orig.clear();
         g_applied = false;
     }
-    auto& c = Cfg::get();
-    bool hideDeco = c.layoutMode || c.ultraLow;
-    bool white = c.layoutMode;
-    bool noGlow = c.layoutMode || c.ultraLow;
-    bool any = hideDeco || white || noGlow;
-    if (pl->m_middleground) pl->m_middleground->setVisible(!c.ultraLow);
-    if (!any && !g_applied) return;
+    bool any = Cfg::get().layoutMode;
+    if (any == g_applied) return;          // nothing changed: no work at all
     if (!pl->m_objects) return;
+    bool hideDeco = any, white = any, noGlow = any;
 
     for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
         if (!obj) continue;

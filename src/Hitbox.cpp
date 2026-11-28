@@ -57,15 +57,9 @@ namespace {
         unsigned n = pl->m_objects ? pl->m_objects->count() : 0;
         if (pl == g_owner && n == g_count) {
             // moving objects (move triggers) change their x: keep the order right so none are missed.
-            // The list is almost sorted already, so insertion sort is cheap; done twice a second.
-            if (++g_sortTick % 30 == 0) {
-                for (size_t i = 1; i < g_sorted.size(); ++i) {
-                    auto o = g_sorted[i];
-                    size_t j = i;
-                    while (j > 0 && byX(o, g_sorted[j - 1])) { g_sorted[j] = g_sorted[j - 1]; --j; }
-                    g_sorted[j] = o;
-                }
-            }
+            // A full sort once a second has a fixed cost (an insertion sort could freeze the game when many
+            // objects move far).
+            if (++g_sortTick % 60 == 0) std::sort(g_sorted.begin(), g_sorted.end(), byX);
             return;
         }
         g_owner = pl;
@@ -81,6 +75,14 @@ namespace {
 
     CCRect objRect(GameObject* o);
 
+    // a box that can be drawn: real numbers, not empty, not absurdly big (scale 0, NaN or 10000-block-wide
+    // objects exist in real levels and made the drawing code allocate huge buffers)
+    bool validRect(CCRect const& r) {
+        float v[4] = {r.origin.x, r.origin.y, r.size.width, r.size.height};
+        for (float f : v) if (!std::isfinite(f)) return false;
+        return r.size.width > 0.01f && r.size.height > 0.01f && r.size.width < 6000.f && r.size.height < 6000.f;
+    }
+
     // objects the game currently ignores for collision: "no touch", or in a group that is toggled off
     bool collides(GameObject* o) { return !o->m_isNoTouch && !o->m_isGroupDisabled; }
 
@@ -92,6 +94,7 @@ namespace {
         for (; it != g_sorted.end() && (*it)->getPositionX() <= x1 + kMargin; ++it) {
             if (!collides(*it)) continue;
             auto r = objRect(*it);
+            if (!validRect(r)) continue;        // broken / invisible-size objects would poison the drawing
             if (r.getMaxX() < x0 || r.getMinX() > x1) continue;
             f(*it);
         }
@@ -161,7 +164,10 @@ namespace {
     }
 
     // saw blades and other round hazards: the game tests a circle, not a box
-    bool isCircle(GameObject* o) { return o->m_objectRadius > 0.f && o->m_objectType != GameObjectType::Slope; }
+    bool isCircle(GameObject* o) {
+        float r = o->m_objectRadius;
+        return std::isfinite(r) && r > 0.f && r < 2000.f && o->m_objectType != GameObjectType::Slope;
+    }
 
     bool needsPolygon(GameObject* o) {
         return o->m_objectType == GameObjectType::Slope || isTilted(o) || isCircle(o);
@@ -282,6 +288,24 @@ namespace {
         ys.erase(std::unique(ys.begin(), ys.end(), same), ys.end());
         int nx = static_cast<int>(xs.size()) - 1, ny = static_cast<int>(ys.size()) - 1;
         if (nx <= 0 || ny <= 0) return;
+
+        ccColor4F plain[4] = {{0, 0, 0, 0},
+                              {0.05f, 0.12f, 0.95f, 1.f},
+                              {0.1f, 0.75f, 0.2f, fillA},
+                              {0.55f, 0.05f, 0.05f, fillA}};
+        // Very busy screens would need a gigantic grid (cells = columns x rows): that ran out of memory and
+        // crashed. Then every area is simply drawn on its own, blue first, red last (red still on top).
+        if (static_cast<size_t>(nx) * static_cast<size_t>(ny) > 250000) {
+            for (uint8_t lvl = 1; lvl <= 3; ++lvl) {
+                for (auto& a : areas) {
+                    if (a.level != lvl) continue;
+                    auto q = corners(a.r);
+                    n->drawPolygon(q.data(), 4, plain[lvl], lvl >= 2 ? bw / 2.f : 0.f,
+                                   lvl == 3 ? ccColor4F{1.f, 0.1f, 0.1f, 1.f} : lvl == 2 ? ccColor4F{0.2f, 1.f, 0.3f, 1.f} : plain[1]);
+                }
+            }
+            return;
+        }
 
         auto idx = [](std::vector<float> const& v, float x) {
             return static_cast<int>(std::lower_bound(v.begin(), v.end(), x - 0.005f) - v.begin());
@@ -463,24 +487,23 @@ namespace {
         poly(n, corners(innerOf(outer)), {60, 220, 255}, true);
     }
 
-    // Trail like a swept band: every two following boxes are joined by their convex hull, so the trail is one
-    // solid ribbon. Red = outer hitbox, blue = inner hitbox on top. One box per physics tick, so it shows
-    // exactly what the game computed at the current TPS.
+    // Trail = the real hitbox of every physics tick, drawn one by one (nothing smoothed or joined): at 240 TPS
+    // that is 240 boxes per second of gameplay, at 360 TPS 360. The boxes are taken per tick, not per rendered
+    // frame, so the speedhack (or FPS) does not change how many there are.
+    // Red outline = outer hitbox, blue outline = inner hitbox.
     void drawTrail(CCDrawNode* n, std::deque<TrailBox> const& t) {
         if (t.empty()) return;
-        ccColor4F red{1.f, 0.f, 0.f, 1.f}, blue{0.f, 0.f, 0.85f, 1.f};
-        auto sweep = [&](bool outer, float g, ccColor4F col) {
-            for (size_t i = 0; i < t.size(); ++i) {
-                CCRect a = outer ? t[i].outer : t[i].inner;
-                CCRect b = outer ? t[i ? i - 1 : 0].outer : t[i ? i - 1 : 0].inner;
-                auto pts = corners(grow(a, g, g));
-                auto pb = corners(grow(b, g, g));
-                pts.insert(pts.end(), pb.begin(), pb.end());
-                fillPoly(n, hullOf(std::move(pts)), col, 0.f, col);
-            }
-        };
-        sweep(true, 0.f, red);
-        sweep(false, 0.f, blue);
+        ccColor4F none{0.f, 0.f, 0.f, 0.f};
+        ccColor4F red{1.f, 0.f, 0.f, 1.f}, blue{0.f, 0.25f, 1.f, 1.f};
+        float bw = std::max(0.3f, Cfg::get().hitBorder * 0.5f);
+        for (auto const& b : t) {
+            auto o = corners(b.outer);
+            n->drawPolygon(o.data(), 4, none, bw, red);
+        }
+        for (auto const& b : t) {
+            auto i = corners(b.inner);
+            n->drawPolygon(i.data(), 4, none, bw, blue);
+        }
     }
 
     void push(std::deque<TrailBox>& t, PlayerObject* p) {
@@ -518,6 +541,8 @@ void reset() {
     g_center2.clear();
 }
 
+static void drawAll(PlayLayer* pl, CCDrawNode* node, Cfg const& c);
+
 void update(PlayLayer* pl) {
     auto& c = Cfg::get();
     static bool s_drawn = false;
@@ -526,10 +551,19 @@ void update(PlayLayer* pl) {
         s_drawn = false;
         return;
     }
-    if (path::simulating() || !pl->m_player1) return;
+    if (path::simulating() || !pl->m_player1 || !pl->m_objectLayer) return;
     auto node = getNode(pl);
     node->clear();
     s_drawn = true;
+    try {
+        drawAll(pl, node, c);
+    } catch (...) {
+        // never take the game down because of an overlay (e.g. out of memory on an extreme level)
+        node->clear();
+    }
+}
+
+static void drawAll(PlayLayer* pl, CCDrawNode* node, Cfg const& c) {
     ensureCache(pl);
 
     // Hitborders and hitboxes are independent: turn both on to get the NaN look (merged danger area underneath,

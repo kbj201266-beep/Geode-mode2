@@ -33,6 +33,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <sstream>
 #include <type_traits>
 
@@ -109,6 +110,16 @@ namespace {
         bool needReset = false, trialDead = false, completed = false, injecting = false;
         bool restartAfter = false;           // put the player back at the level start on the next frame
         int stepFrame = 0;                   // frame number of the physics step being processed right now
+        bool inStep = false;                 // inside a physics step right now (between beforeStep and afterStep)
+        // clicks that came in between two physics steps: they belong to the NEXT step and get its frame there.
+        // Before, they got the frame of the step before, so the bot pressed one tick too early.
+        std::vector<std::pair<bool, bool>> pendingRec;    // {down, p1}
+
+        // practice fix while recording: the full player state of every practice checkpoint, put back when you
+        // respawn there - like a continuous run, so the recorded bot replays it the same way from the start
+        std::map<CheckpointObject*, std::pair<PState, PState>> practice;
+        CheckpointObject* practiceCp = nullptr;   // checkpoint loaded by the respawn being processed right now
+        std::string levelName;               // name of the level being played (new recordings are named after it)
 
         std::vector<Input> trial;            // what is injected (macro for playback, shifted macro for counting)
         size_t cursor = 0;
@@ -339,10 +350,8 @@ namespace {
     void ensureReplayFile() {
         refreshList();
         if (hasSelection()) return;
-        std::string base = "replay";
-        if (auto pl = PlayLayer::get()) {
-            if (pl->m_level) base = std::string(pl->m_level->m_levelName);
-        }
+        // the level name is remembered on entering (the level may already be going away here)
+        std::string base = s.levelName.empty() ? std::string("replay") : s.levelName;
         std::string name;
         for (char ch : base) {
             if (std::isalnum(static_cast<unsigned char>(ch)) || ch == ' ' || ch == '_' || ch == '-') name += ch;
@@ -583,8 +592,9 @@ namespace {
 
 // ================= hook-facing API =================
 
-void onLevelEnter(PlayLayer*) {
+void onLevelEnter(PlayLayer* pl) {
     if (active()) stop("Stopped");
+    s.levelName = (pl && pl->m_level) ? std::string(pl->m_level->m_levelName) : std::string();
     s.restartAfter = false;      // a fresh level is already at the start
     s.armed = s.recording = false;
     if (s.mode == Mode::Record) {  // Record chosen before entering: start recording from this level's start
@@ -592,6 +602,9 @@ void onLevelEnter(PlayLayer*) {
         s.restartAfter = true;
     }
     releaseCps();
+    s.practice.clear();
+    s.practiceCp = nullptr;
+    s.pendingRec.clear();
     s.lines.clear();
     s.trialPath.clear();
     refreshList();
@@ -608,6 +621,10 @@ void onLevelExit() {
     finishRecording();           // quitting the level saves what was recorded so far
     s.armed = s.recording = false;
     releaseCps();
+    s.practice.clear();
+    s.practiceCp = nullptr;
+    s.pendingRec.clear();
+    s.inStep = false;
     s.lines.clear();
     s.trialPath.clear();
 }
@@ -620,13 +637,33 @@ bool filterInput(bool, int, bool) {
 
 // Recording and playback use the SAME frame number: the one taken at the start of the physics step
 // (beforeStep). Playback presses at that same point of the same step, so the bot repeats the run exactly.
+// A click that arrives between two steps (that is how a real mouse / key press usually comes in) only acts on
+// the next step, so it is stamped with that step's frame when the step starts.
 void onInput(GJBaseGameLayer*, bool down, int button, bool p1) {
-    if (s.recording && !s.injecting && button == 1) s.macro.push_back({s.stepFrame, down, p1});
+    if (!s.recording || s.injecting || button != 1) return;
+    if (s.inStep) s.macro.push_back({s.stepFrame, down, p1});
+    else s.pendingRec.push_back({down, p1});
 }
+
+void afterStep() { s.inStep = false; }
+
+void onStoreCheckpoint(PlayLayer* pl, CheckpointObject* cp) {
+    if (!cp || active()) return;
+    auto& st = s.practice[cp];
+    savePlayer(pl->m_player1, st.first);
+    savePlayer(pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr, st.second);
+}
+
+void onLoadCheckpoint(PlayLayer*, CheckpointObject* cp) { s.practiceCp = active() ? nullptr : cp; }
 
 void beforeStep(GJBaseGameLayer* l) {
     int f = frameOf(l);
     s.stepFrame = f;
+    s.inStep = true;
+    if (!s.pendingRec.empty()) {
+        if (s.recording) for (auto& [down, p1] : s.pendingRec) s.macro.push_back({f, down, p1});
+        s.pendingRec.clear();
+    }
     if (active() && s.needReset) return;      // the old run is still going until the reset happens
     bool baseline = s.phase == Phase::Baseline;
 
@@ -728,7 +765,15 @@ void onReset(PlayLayer* pl) {
             loadPlayer(pl->m_player1, s.cpP1[i]);
             loadPlayer(pl->m_player2, s.cpP2[i]);
         }
+    } else if (s.recording && s.practiceCp) {
+        // practice respawn while recording: the player continues exactly as it was when the checkpoint was placed
+        auto it = s.practice.find(s.practiceCp);
+        if (it != s.practice.end()) {
+            loadPlayer(pl->m_player1, it->second.first);
+            loadPlayer(pl->m_player2, it->second.second);
+        }
     }
+    s.pendingRec.clear();        // clicks of the old attempt never leak into the new one
     int f = frameOf(pl);
     // the restart Record mode does itself always starts the recording (a start position or practice mode can
     // make the first frame bigger than 1, and then the recording never started before)

@@ -564,11 +564,17 @@ void update(PlayLayer* pl) {
     auto node = getNode(pl);
     node->clear();
     s_drawn = true;
+    // never take the game down because of an overlay (e.g. out of memory on an extreme level); the reason goes
+    // to the Geode log (a few times only) so a vanishing overlay can be traced
+    static int s_errors = 0;
     try {
         drawAll(pl, node, c);
-    } catch (...) {
-        // never take the game down because of an overlay (e.g. out of memory on an extreme level)
+    } catch (std::exception const& e) {
         node->clear();
+        if (s_errors++ < 5) log::warn("[hitbox] drawing failed: {}", e.what());
+    } catch (...) {
+        node->clear();
+        if (s_errors++ < 5) log::warn("[hitbox] drawing failed (unknown error)");
     }
 }
 

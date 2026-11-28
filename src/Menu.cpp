@@ -204,7 +204,9 @@ namespace {
             close->setPosition(origin + ccp(W - 16.f, H - 16.f));
             m_buttonMenu->addChild(close);
 
-            auto title = CCLabelBMFont::create("GD Toolkit", "goldFont.fnt");
+            // the version shows which build is really installed (check it after every GitHub build)
+            std::string titleText = "GD Toolkit " + Mod::get()->getVersion().toVString();
+            auto title = CCLabelBMFont::create(titleText.c_str(), "goldFont.fnt");
             title->setScale(0.6f);
             title->setPosition(ccp(win.width / 2 + SIDE / 2, origin.y + H - 16.f));
             m_mainLayer->addChild(title, 6);
@@ -461,6 +463,12 @@ namespace {
             m_status = text("", 0.f, m_y, 0.3f, kAccent, m_content);
             m_summary = text("", 0.f, m_y - 12.f, 0.26f, kText, m_content);
             m_summary->setAnchorPoint({0.f, 1.f});
+
+            // Antic's Counter installed next to this mod: say so, and how to keep them from disturbing each other
+            if (Loader::get()->isModLoaded("anticroom.antics-counter")) {
+                text("Antic's Counter found: count with its pause-menu button.", 0.f, -H + 58.f, 0.24f, kMuted, m_content);
+                text("Turn Noclip off while it counts.", 0.f, -H + 48.f, 0.24f, kMuted, m_content);
+            }
         }
 
         void tick(float) {

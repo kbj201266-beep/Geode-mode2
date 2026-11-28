@@ -558,6 +558,16 @@ void onLevelEnter(PlayLayer*) {
     ++s.version;
 }
 
+// The level is being left: the saved checkpoints belong to it, so they are freed while it still exists.
+void onLevelExit() {
+    if (active()) stop("Stopped");
+    s.restartAfter = false;
+    s.armed = s.recording = false;
+    releaseCps();
+    s.lines.clear();
+    s.trialPath.clear();
+}
+
 bool filterInput(bool, int, bool) {
     if (active()) return s.injecting;
     if (playing() && Cfg::get().ignoreInputs) return s.injecting;

@@ -131,7 +131,9 @@ namespace {
         }
 
     private:
-        static constexpr float W = 460.f, H = 300.f, SIDE = 64.f;
+        // the sidebar holds the 6 tab buttons in 2 columns x 3 rows, so each button can be big and easy to tap
+        static constexpr float H = 300.f, SIDE = 150.f;
+        float W = 600.f;                   // set from the screen width in setup()
         CCNode* m_content = nullptr;
         CCMenu* m_contentMenu = nullptr;
         std::vector<CCMenuItemSpriteExtra*> m_tabBtns;
@@ -160,6 +162,7 @@ namespace {
             m_mainLayer->addChild(m_buttonMenu, 10);
 
             auto win = CCDirector::get()->getWinSize();
+            W = std::clamp(win.width - 16.f, 500.f, 640.f);
             auto origin = ccp(win.width / 2 - W / 2, win.height / 2 - H / 2);
 
             auto panel = CCScale9Sprite::create("square02b_001.png");
@@ -176,15 +179,22 @@ namespace {
             side->setPosition(origin + ccp(SIDE / 2 + 6.f, H / 2));
             m_mainLayer->addChild(side);
 
-            // sidebar tab buttons
+            // sidebar tab buttons: big icons (64 px) with their name under them, 2 columns x 3 rows
             for (int i = 0; i < TabCount; ++i) {
+                float cx = 6.f + (i % 2 == 0 ? SIDE * 0.25f + 2.f : SIDE * 0.75f - 2.f);
+                float cy = H - 62.f - (i / 2) * 88.f;
                 auto icon = modSprite(kTabIcons[i]);
-                icon->setScale(0.34f);
+                icon->setScale(0.5f);
                 auto btn = CCMenuItemSpriteExtra::create(icon, this, menu_selector(ToolkitMenu::onTab));
                 btn->setTag(i);
-                btn->setPosition(origin + ccp(SIDE / 2 + 6.f, H - 36.f - i * 42.f));
+                btn->setPosition(origin + ccp(cx, cy));
                 m_buttonMenu->addChild(btn);
                 m_tabBtns.push_back(btn);
+                auto name = CCLabelBMFont::create(kTabNames[i], "bigFont.fnt");
+                name->setScale(0.22f);
+                name->setColor(kMuted);
+                name->setPosition(origin + ccp(cx, cy - 40.f));
+                m_mainLayer->addChild(name, 6);
             }
 
             // close
@@ -232,7 +242,7 @@ namespace {
             return l;
         }
 
-        float contentW() const { return W - SIDE - 56.f; }
+        float contentW() const { return std::max(320.f, W - SIDE - 56.f); }
 
         void addToggle(char const* label, bool& ref, bool restart = false) {
             text(label, 0.f, m_y, 0.38f, kText, m_content);
@@ -363,7 +373,7 @@ namespace {
                     text("green = hold   red = release", 0.f, m_y - 2.f, 0.3f, kMuted, m_content);
                     break;
                 case Display:
-                    addToggle("Layout mode", c.layoutMode, true);
+                    addToggle("Layout mode (re-open level)", c.layoutMode, true);
                     addToggle("Practice music sync", c.practiceSync);
                     addToggle("Counter overlay", c.counterOverlay);
                     addToggle("Window cue on screen", c.counterHud);

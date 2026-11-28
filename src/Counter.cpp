@@ -34,7 +34,7 @@ namespace {
     constexpr int kMaxSide = 12;         // search at most 12 frames each way -> window up to 25f
     constexpr float kCountSpeed = 8.f;   // replay speed while counting
     constexpr float kNoPos = -1e9f;
-    constexpr size_t kMaxLines = 40;     // trial lines kept on screen for the current click
+    constexpr size_t kMaxLines = 16;     // trial lines kept on screen for the current click
 
     enum class Phase { Idle, Baseline, Trial };
     // sides of one click: 0 click earlier, 1 click later, 2 release earlier, 3 release later
@@ -61,6 +61,7 @@ namespace {
         std::vector<CCPoint> path;           // player path from the counting run
         int lastPathFrame = -1;
         int version = 0;                     // bumps whenever the overlay must redraw
+        int trialSerial = 0;                 // bumps whenever the finished trial lines change
 
         std::vector<CheckpointObject*> cps;  // retained checkpoint a few frames before each click
         std::vector<int> cpFrame;
@@ -322,6 +323,7 @@ namespace {
         s.dir = DownEarly;
         s.off = -1;
         s.lines.clear();
+        ++s.trialSerial;
     }
 
     // move on to the next side of the current click, or to the next click
@@ -352,6 +354,7 @@ namespace {
         s.restartAfter = true;
         s.msg = why;
         s.lines.clear();
+        ++s.trialSerial;
         s.trialPath.clear();
         releaseCps();
         syncTrial();
@@ -391,6 +394,7 @@ namespace {
             if (!s.trialPath.empty()) {
                 s.lines.push_back({s.trialPath, ok});
                 if (s.lines.size() > kMaxLines) s.lines.erase(s.lines.begin());
+                ++s.trialSerial;
             }
             auto& r = s.results[s.k];
             if (ok) {
@@ -608,6 +612,7 @@ void startCounting() {
     }
     s.path.clear();
     s.lines.clear();
+    ++s.trialSerial;
     s.trialPath.clear();
     s.lastPathFrame = -1;
     s.limit = static_cast<int>(s.clicks.size());
@@ -704,6 +709,7 @@ std::vector<CCPoint> const& pathPoints() { return s.path; }
 std::vector<TrialLine> const& trialLines() { return s.lines; }
 std::vector<CCPoint> const& currentTrialPath() { return s.trialPath; }
 int version() { return s.version; }
+int trialSerial() { return s.trialSerial; }
 
 // ---------- replay files ----------
 

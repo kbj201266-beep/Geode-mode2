@@ -10,8 +10,9 @@ using namespace geode::prelude;
 class $modify(KtPlayLayer, PlayLayer) {
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
-        kt::hitbox::reset();
+        kt::hitbox::enter();
         kt::path::reset();
+        kt::view::reset();
         kt::noclip::reset();
         kt::hud::attach(this);
         kt::layout::apply(this);
@@ -79,8 +80,9 @@ class $modify(KtPlayLayer, PlayLayer) {
 class $modify(KtBaseLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (!isHalfTick) {
-            kt::speed::onStep();
-            kt::noclip::onStep();
+            auto& c = Cfg::get();
+            if (c.showTps) kt::speed::onStep();     // only measured when it is shown
+            if (c.noclip) kt::noclip::onStep();
         }
         kt::counter::beforeStep(this);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);

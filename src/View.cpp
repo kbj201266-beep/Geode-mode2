@@ -378,7 +378,7 @@ void update(PlayLayer* pl) {
     }
     auto& c = Cfg::get();
     bool counting = counter::isCounting();
-    updateCounting(pl, counting && c.counterOverlay);
+    updateCounting(pl, counting);       // the counting progress is always shown, whatever the overlay switch
     updatePath(pl, c.counterOverlay);
     updateRings(pl, c.counterOverlay);
     updateLast(pl, c.counterOverlay && !counting);

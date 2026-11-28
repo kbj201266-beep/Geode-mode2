@@ -194,6 +194,31 @@ class $modify(KtScheduler, CCScheduler) {
     }
 };
 
+#ifdef GEODE_IS_WINDOWS
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
+// Windows: the T key opens the menu - in a level (the game is paused first) and on the main menu.
+// Other screens are left alone so typing a "t" into a search box never opens it.
+class $modify(KtKeyboard, CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double time) {
+        if (key == KEY_T && down && !repeat && !kt::ui::isOpen()) {
+            auto pl = PlayLayer::get();
+            auto scene = CCDirector::get()->getRunningScene();
+            bool onMenu = scene && scene->getChildByType<MenuLayer>(0);
+            if (pl && g_ready == pl) {
+                if (!pl->m_isPaused && !pl->m_hasCompletedLevel) pl->pauseGame(false);
+                kt::ui::open();
+                return true;
+            }
+            if (!pl && onMenu) {
+                kt::ui::open();
+                return true;
+            }
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, time);
+    }
+};
+#endif
+
 // The floating menu button is created once, on the first main menu, and then lives in every scene.
 class $modify(KtMenuLayer, MenuLayer) {
     bool init() {

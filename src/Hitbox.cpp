@@ -186,12 +186,30 @@ namespace {
             auto r = objRect(o);
             CCPoint bl(r.getMinX(), r.getMinY()), br(r.getMaxX(), r.getMinY());
             CCPoint tl(r.getMinX(), r.getMaxY()), tr(r.getMaxX(), r.getMaxY());
+#ifdef GEODE_IS_WINDOWS
+            // slopeFloorTop / slopeWallLeft do not exist on Windows (inlined by the compiler), so the triangle is
+            // computed from the object itself: the unrotated slope is the right triangle bl, br, tr (ramp going up
+            // to the right, vertical wall on the right); flip and rotation are applied to it and every point is
+            // snapped to the corner of the box it lands in.
+            float a = o->getRotation() * 3.14159265f / 180.f;
+            float ca = std::cos(a), sa = std::sin(a);
+            std::vector<CCPoint> tri;
+            for (CCPoint p : {CCPoint(-1.f, -1.f), CCPoint(1.f, -1.f), CCPoint(1.f, 1.f)}) {
+                if (o->m_isFlipX) p.x = -p.x;
+                if (o->m_isFlipY) p.y = -p.y;
+                float x = p.x * ca + p.y * sa;          // cocos rotation is clockwise
+                float y = -p.x * sa + p.y * ca;
+                tri.push_back(CCPoint(x < 0.f ? r.getMinX() : r.getMaxX(), y < 0.f ? r.getMinY() : r.getMaxY()));
+            }
+            return tri;
+#else
             // GD's names describe the FLAT sides of the triangle: slopeFloorTop = the flat (floor) side is at the
             // top (an upside-down slope), slopeWallLeft = the vertical wall is on the left.
             bool flatTop = o->slopeFloorTop();
             bool wallLeft = o->slopeWallLeft();
             if (flatTop) return wallLeft ? std::vector<CCPoint>{tl, tr, bl} : std::vector<CCPoint>{tl, tr, br};
             return wallLeft ? std::vector<CCPoint>{bl, br, tl} : std::vector<CCPoint>{bl, br, tr};
+#endif
         }
         if (isTilted(o)) {
             auto& c = o->m_orientedBox->m_corners;

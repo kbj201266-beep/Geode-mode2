@@ -41,6 +41,8 @@ namespace practice {
 
 namespace layout {
     void apply(PlayLayer*);    // layout mode: hide decoration, paint hitbox objects white (or undo it)
+    // every level color change goes through this; false = ignore it (layout mode keeps bg/ground blue)
+    bool filterColor(int colorID, cocos2d::ccColor3B& color, float& fadeTime, int& copyID);
 }
 
 namespace counter {
@@ -81,13 +83,14 @@ namespace counter {
     bool onDeath(PlayLayer*);                                      // true = swallow the death
     bool onComplete(PlayLayer*);                                   // true = swallow level complete
     void onReset(PlayLayer*);                                      // after a reset AND after a checkpoint load
-    void update(PlayLayer*);                                       // state machine, once per frame
+    void update(PlayLayer*);                                       // state machine (finish a run / respawn)
+    bool pendingReset();                                           // a respawn for the next run is waiting
 
     Mode mode();
     void setMode(Mode);
     void startCounting();
     void cancelCounting();
-    float speedFactor();         // 8 while counting, otherwise 1
+    float speedFactor();         // always 1 (counting runs many steps per frame instead, see Hooks.cpp)
     bool isRecording();
     bool isCounting();
     bool botPlaying();           // Playback mode with a replay: the mod is clicking, not the player

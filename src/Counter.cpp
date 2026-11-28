@@ -28,10 +28,12 @@
 //   3 click positions "x,y;"             4 path "x,y;"
 //   5 release results "early:late:counted;"   6 release positions "x,y;"
 #include "Common.hpp"
+#include "PlayerState.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <sstream>
+#include <type_traits>
 
 using namespace geode::prelude;
 
@@ -47,11 +49,16 @@ namespace {
     // sides of one click: 0 click earlier, 1 click later, 2 release earlier, 3 release later, 4 control (unchanged)
     enum Side { DownEarly = 0, DownLate = 1, RelEarly = 2, RelLate = 3, Control = 4 };
 
+    constexpr int kSurvive = 120;        // a shifted run must also survive this many ticks after the input
+
     struct Click {
         int down = 0;        // index into macro
         int rel = -1;        // index of the matching release (-1 = held to the end)
-        int checkFrame = 0;  // frame of the next click: surviving until here = success
+        int checkFrame = 0;  // surviving until here = success (next click, and at least kSurvive ticks)
+        int nextPress = 0;   // frame of the next press (inputs may not be moved past it)
     };
+
+    // full player state saved with every checkpoint: see PlayerState.hpp
 
     struct S {
         Mode mode = Mode::Disabled;
@@ -73,6 +80,9 @@ namespace {
         std::vector<CheckpointObject*> cps;  // retained checkpoint a few frames before each click
         std::vector<int> cpFrame;            // planned frame of each checkpoint
         std::vector<int> cpAt;               // frame it was really taken on
+        std::vector<PState> cpP1, cpP2;      // full player state at that moment (see PState)
+        int pendingIdx = -1;                 // which checkpoint is being loaded
+        std::vector<char> relMatters;        // per click: the release changes the path (ship, wave, robot)
         // per click: -1 not tested, 1 checkpoint replays exactly, 0 checkpoint broken -> testing a full restart,
         //            2 full restart verified, 3 not reproducible at all (skipped, shown as "?")
         std::vector<signed char> cpOk;
@@ -134,8 +144,11 @@ namespace {
         s.cps.clear();
         s.cpFrame.clear();
         s.cpAt.clear();
+        s.cpP1.clear();
+        s.cpP2.clear();
         s.cpOk.clear();
         s.nextCp = 0;
+        s.pendingIdx = -1;
         s.frameShift = 0;
         s.pendingCp = -1;
     }
@@ -193,11 +206,14 @@ namespace {
             if (!in.down) continue;
             Click c;
             c.down = i;
-            c.checkFrame = last + 90;
+            c.nextPress = last + 90;
             for (int j = i + 1; j < static_cast<int>(s.macro.size()); ++j) {
                 if (c.rel < 0 && !s.macro[j].down && s.macro[j].p1 == in.p1) c.rel = j;
-                if (s.macro[j].down) { c.checkFrame = s.macro[j].frame; break; }
+                if (s.macro[j].down) { c.nextPress = s.macro[j].frame; break; }
             }
+            // a shift only works if the run survives until the next click AND a while after the input
+            // (the recorded inputs keep playing meanwhile)
+            c.checkFrame = std::max(c.nextPress, in.frame + kSurvive);
             s.clicks.push_back(c);
         }
         s.results.assign(s.clicks.size(), Result{});
@@ -324,7 +340,7 @@ namespace {
     bool makeTrial(int click, int off, int side) {
         s.trial = s.macro;
         if (click < 0) {
-            s.checkFrame = (s.macro.empty() ? 0 : s.macro.back().frame) + 90;
+            s.checkFrame = (s.macro.empty() ? 0 : s.macro.back().frame) + kSurvive + 10;
             return true;
         }
         auto& c = s.clicks[click];
@@ -337,11 +353,11 @@ namespace {
             if (c.rel < 0) return false;
             s.trial[c.rel].frame += off;
             if (s.trial[c.rel].frame <= s.trial[c.down].frame) return false;
-            if (s.trial[c.rel].frame >= c.checkFrame) return false;
+            if (s.trial[c.rel].frame >= c.nextPress) return false;
         } else {
             s.trial[c.down].frame += off;
             if (c.rel >= 0) s.trial[c.rel].frame += off;
-            if (s.trial[c.down].frame >= c.checkFrame) return false;
+            if (s.trial[c.down].frame >= c.nextPress) return false;
             // the respawn point is before the earliest press we try; never move a press in front of it
             if (s.cpOk[click] == 1 && s.trial[c.down].frame < s.cpFrame[click]) return false;
         }
@@ -370,8 +386,12 @@ namespace {
             case DownLate:
                 r.counted = true;          // the click window is final: it appears on screen now
                 ++s.version;
-                if (s.clicks[s.k].rel >= 0) { s.dir = RelEarly; s.off = -1; }
-                else advanceClick();
+                if (s.clicks[s.k].rel >= 0 && s.k < static_cast<int>(s.relMatters.size()) && s.relMatters[s.k]) {
+                    s.dir = RelEarly;
+                    s.off = -1;
+                } else {
+                    advanceClick();
+                }
                 break;
             case RelEarly: s.dir = RelLate; s.off = 1; break;
             default:
@@ -549,6 +569,8 @@ void beforeStep(GJBaseGameLayer* l) {
                     cp->retain();
                     s.cps[s.nextCp] = cp;
                     s.cpAt[s.nextCp] = f;
+                    savePlayer(pl->m_player1, s.cpP1[s.nextCp]);
+                    savePlayer(pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr, s.cpP2[s.nextCp]);
                 }
             }
             ++s.nextCp;
@@ -568,8 +590,13 @@ void beforeStep(GJBaseGameLayer* l) {
                 auto p = in.p1 ? l->m_player1 : l->m_player2;
                 if (p && in.down && index < s.downToClick.size() && s.downToClick[index] >= 0)
                     s.clickPos[s.downToClick[index]] = p->getPosition();
-                if (p && !in.down && index < s.relToClick.size() && s.relToClick[index] >= 0)
-                    s.relPos[s.relToClick[index]] = p->getPosition();
+                if (p && !in.down && index < s.relToClick.size() && s.relToClick[index] >= 0) {
+                    int ci = s.relToClick[index];
+                    s.relPos[ci] = p->getPosition();
+                    // a release only changes the path in modes where holding matters (like Antic's Counter):
+                    // ship, wave, robot. Cube / ball / UFO / spider / swing releases are not counted.
+                    s.relMatters[ci] = p->m_isShip || p->m_isDart || p->m_isRobot;
+                }
             }
             l->handleButton(in.down, 1, in.p1);
         }
@@ -628,6 +655,12 @@ void onReset(PlayLayer* pl) {
         // taken: line our frames up with the checkpoint (plus the calibration offset of the control run)
         s.frameShift = s.pendingCp >= 0 ? s.pendingCp - rawFrame(pl) + calibShift() : 0;
         s.reached = false;
+        // put back everything the game's checkpoint forgot
+        int i = s.pendingIdx;
+        if (s.pendingCp >= 0 && i >= 0 && i < static_cast<int>(s.cpP1.size())) {
+            loadPlayer(pl->m_player1, s.cpP1[i]);
+            loadPlayer(pl->m_player2, s.cpP2[i]);
+        }
     }
     int f = frameOf(pl);
     if (s.armed && f <= 1) {
@@ -663,6 +696,7 @@ void update(PlayLayer* pl) {
             // a real practice respawn at OUR checkpoint: resetLevel resets the whole level (orbs, triggers,
             // moving objects...) and then loads the last checkpoint - exactly what happens when you die
             s.pendingCp = s.cpAt[s.k];
+            s.pendingIdx = s.k;
             auto arr = CCArray::create();
             arr->addObject(s.cps[s.k]);
             auto oldArr = pl->m_checkpointArray;
@@ -674,6 +708,7 @@ void update(PlayLayer* pl) {
             pl->m_isPracticeMode = oldPractice;
         } else {
             s.pendingCp = -1;
+            s.pendingIdx = -1;
             pl->resetLevelFromStart();
         }
         return;
@@ -719,7 +754,10 @@ void startCounting() {
     s.cps.assign(nc, nullptr);
     s.cpFrame.assign(nc, 0);
     s.cpAt.assign(nc, 0);
+    s.cpP1.assign(nc, PState{});
+    s.cpP2.assign(nc, PState{});
     s.cpOk.assign(nc, -1);
+    s.relMatters.assign(nc, 0);
     for (size_t i = 0; i < nc; ++i) {
         int down = s.clicks[i].down;
         int cpf = std::max(0, s.macro[down].frame - kMaxSide - 2);

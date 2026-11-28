@@ -163,8 +163,10 @@ class $modify(KtPlayLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
         if (ready(this) != this) return;    // level still loading / already left: touch nothing
         if (g_fastForward) return;          // counting burst: drawn once afterwards
-        kt::hitbox::update(this);
+        // pathfinder first: it borrows level objects for its preview and puts them back, so the hitboxes /
+        // hitborders are drawn from the restored level
         kt::path::update(this);
+        kt::hitbox::update(this);
         kt::counter::update(this);
         kt::view::update(this);
         kt::hud::update(this);
@@ -243,8 +245,9 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         kt::counter::beforeStep(this);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         kt::counter::afterStep();
-        // hitbox trail / center line: one point per physics tick (so it follows the TPS), not while counting
-        if (!isHalfTick && !g_fastForward && g_ready && static_cast<GJBaseGameLayer*>(g_ready) == this) {
+        // hitbox trail / center line: one point per physics tick (so it follows the TPS) - also while counting,
+        // otherwise the yellow center line stopped following the player during a count
+        if (!isHalfTick && g_ready && static_cast<GJBaseGameLayer*>(g_ready) == this) {
             kt::hitbox::onTick(g_ready);
         }
     }

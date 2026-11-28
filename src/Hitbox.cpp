@@ -7,7 +7,7 @@
 // All areas go into ONE grid: every cell gets exactly one color (red > green > blue), so areas never overlap
 // and outlines are drawn only where the color changes.
 //
-// Performance: objects are sorted by x once per level, so each frame only the objects on screen are visited.
+// Performance: objects are sorted by x once per level, so each frame only the objects near the player are visited.
 #include "Common.hpp"
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,10 @@ namespace kt::hitbox {
 namespace {
     constexpr float kInner = 0.3f;     // inner (solid-death) hitbox = 30% of the outer box
     constexpr float kMargin = 400.f;   // extra x range so wide objects are not missed
-    std::deque<CCRect> g_trail1, g_trail2;
+    struct TrailBox {
+        CCRect outer, inner;
+    };
+    std::deque<TrailBox> g_trail1, g_trail2;
     std::deque<CCPoint> g_center1, g_center2;
     constexpr char const* kNodeId = "kt-hitbox-node";
 
@@ -46,10 +49,25 @@ namespace {
     PlayLayer* g_owner = nullptr;
     unsigned g_count = 0;
     std::vector<GameObject*> g_sorted;
+    int g_sortTick = 0;
+
+    bool byX(GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); }
 
     void ensureCache(PlayLayer* pl) {
         unsigned n = pl->m_objects ? pl->m_objects->count() : 0;
-        if (pl == g_owner && n == g_count) return;
+        if (pl == g_owner && n == g_count) {
+            // moving objects (move triggers) change their x: keep the order right so none are missed.
+            // The list is almost sorted already, so insertion sort is cheap; done twice a second.
+            if (++g_sortTick % 30 == 0) {
+                for (size_t i = 1; i < g_sorted.size(); ++i) {
+                    auto o = g_sorted[i];
+                    size_t j = i;
+                    while (j > 0 && byX(o, g_sorted[j - 1])) { g_sorted[j] = g_sorted[j - 1]; --j; }
+                    g_sorted[j] = o;
+                }
+            }
+            return;
+        }
         g_owner = pl;
         g_count = n;
         g_sorted.clear();
@@ -58,11 +76,13 @@ namespace {
         for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
             if (obj && kindOf(obj) != Kind::Skip) g_sorted.push_back(obj);
         }
-        std::sort(g_sorted.begin(), g_sorted.end(),
-                  [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
+        std::sort(g_sorted.begin(), g_sorted.end(), byX);
     }
 
     CCRect objRect(GameObject* o);
+
+    // objects the game currently ignores for collision: "no touch", or in a group that is toggled off
+    bool collides(GameObject* o) { return !o->m_isNoTouch && !o->m_isGroupDisabled; }
 
     // only objects whose box really reaches into [x0, x1] (the visible part of the level)
     template <class F>
@@ -70,6 +90,7 @@ namespace {
         auto it = std::lower_bound(g_sorted.begin(), g_sorted.end(), x0 - kMargin,
                                    [](GameObject* o, float x) { return o->getPositionX() < x; });
         for (; it != g_sorted.end() && (*it)->getPositionX() <= x1 + kMargin; ++it) {
+            if (!collides(*it)) continue;
             auto r = objRect(*it);
             if (r.getMaxX() < x0 || r.getMinX() > x1) continue;
             f(*it);
@@ -139,13 +160,28 @@ namespace {
         return r > 0.5f && r < 89.5f;
     }
 
+    // saw blades and other round hazards: the game tests a circle, not a box
+    bool isCircle(GameObject* o) { return o->m_objectRadius > 0.f && o->m_objectType != GameObjectType::Slope; }
+
     bool needsPolygon(GameObject* o) {
-        return o->m_objectType == GameObjectType::Slope || isTilted(o);
+        return o->m_objectType == GameObjectType::Slope || isTilted(o) || isCircle(o);
     }
 
-    // The real hitbox shape: a triangle for slopes (45 and 22.5 degree), the rotated box for tilted objects,
-    // otherwise the plain rectangle.
+    // The real hitbox shape: a circle for round hazards, a triangle for slopes (45 and 22.5 degree), the rotated
+    // box for tilted objects, otherwise the plain rectangle.
     std::vector<CCPoint> shapeOf(GameObject* o) {
+        if (isCircle(o)) {
+            auto r = objRect(o);
+            CCPoint c(r.getMidX(), r.getMidY());
+            float rad = o->m_objectRadius * std::max(std::fabs(o->getScaleX()), std::fabs(o->getScaleY()));
+            std::vector<CCPoint> pts;
+            constexpr int seg = 24;
+            for (int i = 0; i < seg; ++i) {
+                float a = 6.2831853f * i / seg;
+                pts.push_back(CCPoint(c.x + rad * std::cos(a), c.y + rad * std::sin(a)));
+            }
+            return pts;
+        }
         if (o->m_objectType == GameObjectType::Slope) {
             auto r = objRect(o);
             CCPoint bl(r.getMinX(), r.getMinY()), br(r.getMaxX(), r.getMinY());
@@ -164,6 +200,8 @@ namespace {
         return corners(o->getObjectRect());
     }
 
+    std::vector<CCPoint> hullOf(std::vector<CCPoint> pts);
+
     // shape grown by a box of half size (hx, hy) = convex hull of the shape moved to every box corner
     std::vector<CCPoint> grownHull(std::vector<CCPoint> const& shape, float hx, float hy) {
         std::vector<CCPoint> pts;
@@ -173,6 +211,12 @@ namespace {
             pts.push_back(CCPoint(p.x + hx, p.y + hy));
             pts.push_back(CCPoint(p.x - hx, p.y + hy));
         }
+        return hullOf(std::move(pts));
+    }
+
+    // convex hull (monotone chain)
+    std::vector<CCPoint> hullOf(std::vector<CCPoint> pts) {
+        if (pts.size() < 3) return pts;
         std::sort(pts.begin(), pts.end(), [](CCPoint const& a, CCPoint const& b) {
             return a.x < b.x || (a.x == b.x && a.y < b.y);
         });
@@ -303,7 +347,7 @@ namespace {
     void pushCenter(std::deque<CCPoint>& t, PlayerObject* p) {
         if (!p) return;
         t.push_back(p->getPosition());
-        while (static_cast<int>(t.size()) > std::max(2, Cfg::get().trailLen * 4)) t.pop_front();
+        while (static_cast<int>(t.size()) > std::clamp(Cfg::get().trailLen * 4, 2, 1200)) t.pop_front();
     }
 
     void drawCenter(CCDrawNode* n, std::deque<CCPoint> const& t, PlayerObject* p) {
@@ -336,7 +380,7 @@ namespace {
                     case Kind::Hazard: redP.push_back(grownHull(shape, ox, oy)); break;
                     case Kind::Solid:
                         blueP.push_back(grownHull(shape, ox, oy));
-                        redP.push_back(grownHull(shape, ix, iy));
+                        if (!obj->m_isPassable) redP.push_back(grownHull(shape, ix, iy));
                         break;
                     case Kind::Special: greenP.push_back(grownHull(shape, ox, oy)); break;
                     default: break;
@@ -348,7 +392,8 @@ namespace {
                 case Kind::Hazard: areas.push_back({grow(r, ox, oy), 3}); break;
                 case Kind::Solid:
                     areas.push_back({grow(r, ox, oy), 1});
-                    areas.push_back({grow(r, ix, iy), 3});
+                    // passable blocks (jump through from below) can never kill: no red core
+                    if (!obj->m_isPassable) areas.push_back({grow(r, ix, iy), 3});
                     break;
                 case Kind::Special: areas.push_back({grow(r, ox, oy), 2}); break;
                 default: break;
@@ -379,8 +424,10 @@ namespace {
             case Kind::Skip: return;
             default: col = {80, 255, 120}; break;      // portals, pads, orbs, coins...
         }
-        // Slopes are triangles, rotated objects use their oriented box, everything else is an axis aligned rect.
-        if (o->m_objectType == GameObjectType::Slope) {
+        // Circles for round hazards, triangles for slopes, oriented boxes for rotated objects, else a rect.
+        if (isCircle(o)) {
+            poly(n, shapeOf(o), col, true);
+        } else if (o->m_objectType == GameObjectType::Slope) {
             if (o->m_slopeIsHazard) col = {255, 60, 60};
             poly(n, shapeOf(o), col, true);
         } else if (o->m_orientedBox) {
@@ -398,17 +445,30 @@ namespace {
         poly(n, corners(innerOf(outer)), {60, 220, 255}, true);
     }
 
-    void drawTrail(CCDrawNode* n, std::deque<CCRect> const& t, ccColor3B col) {
-        size_t i = 0;
-        for (auto const& r : t) {
-            float a = 0.10f + 0.5f * (static_cast<float>(++i) / static_cast<float>(t.size()));
-            poly(n, corners(r), col, false, a);
-        }
+    // Trail like a swept band: every two following boxes are joined by their convex hull, so the trail is one
+    // solid ribbon. Red = outer hitbox (with a dark red edge), blue = inner hitbox on top.
+    void drawTrail(CCDrawNode* n, std::deque<TrailBox> const& t) {
+        if (t.empty()) return;
+        ccColor4F edge{0.45f, 0.f, 0.f, 1.f}, red{1.f, 0.f, 0.f, 1.f}, blue{0.f, 0.f, 0.85f, 1.f};
+        auto sweep = [&](bool outer, float g, ccColor4F col) {
+            for (size_t i = 0; i < t.size(); ++i) {
+                CCRect a = outer ? t[i].outer : t[i].inner;
+                CCRect b = outer ? t[i ? i - 1 : 0].outer : t[i ? i - 1 : 0].inner;
+                auto pts = corners(grow(a, g, g));
+                auto pb = corners(grow(b, g, g));
+                pts.insert(pts.end(), pb.begin(), pb.end());
+                fillPoly(n, hullOf(std::move(pts)), col, 0.f, col);
+            }
+        };
+        sweep(true, 1.2f, edge);
+        sweep(true, 0.f, red);
+        sweep(false, 0.f, blue);
     }
 
-    void push(std::deque<CCRect>& t, PlayerObject* p) {
+    void push(std::deque<TrailBox>& t, PlayerObject* p) {
         if (!p) return;
-        t.push_back(p->getObjectRect());
+        auto outer = p->getObjectRect();
+        t.push_back({outer, innerOf(outer)});
         while (static_cast<int>(t.size()) > std::max(1, Cfg::get().trailLen)) t.pop_front();
     }
 }
@@ -452,8 +512,8 @@ void update(PlayLayer* pl) {
     if (c.hitboxTrail) {
         push(g_trail1, pl->m_player1);
         push(g_trail2, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr);
-        drawTrail(node, g_trail1, {255, 215, 60});
-        drawTrail(node, g_trail2, {255, 140, 60});
+        drawTrail(node, g_trail1);
+        drawTrail(node, g_trail2);
     }
     if (!c.hitboxes) return;
 

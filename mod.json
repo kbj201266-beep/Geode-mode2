@@ -7,7 +7,7 @@
     },
     "id": "kimyy.gd-toolkit",
     "name": "GD Toolkit",
-    "version": "v0.1.0",
+    "version": "v1.1.0",
     "developer": "kimyy",
     "description": "Hitboxes, noclip, pathfinder, layout mode, practice music sync, speedhack, physical TPS and a window frame counter.",
     "tags": ["gameplay", "utility"],

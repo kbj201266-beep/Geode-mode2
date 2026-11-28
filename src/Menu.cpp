@@ -518,8 +518,8 @@ namespace {
         void onFolder(CCObject*) { counter::openReplaysFolder(); }
         void onCount(CCObject*) {
             if (!PlayLayer::get()) { note("Open this inside a level"); return; }
-            counter::startCounting();
-            note("Close the menu and resume - counting runs automatically");
+            note(counter::startCounting());     // says exactly what happens (or why it cannot count)
+            tick(0.f);
         }
         void onCancel(CCObject*) {
             if (counter::isCounting()) counter::cancelCounting();

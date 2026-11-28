@@ -450,10 +450,11 @@ namespace {
         for (auto& p : greenP) fillPoly(n, p, {0.1f, 0.75f, 0.2f, fa}, bw / 2.f, {0.2f, 1.f, 0.3f, 1.f});
         for (auto& p : redP) fillPoly(n, p, {0.55f, 0.05f, 0.05f, fa}, bw / 2.f, {1.f, 0.1f, 0.1f, 1.f});
 
-        pushCenter(g_center1, pl->m_player1);
+        // the yellow center line gets its points per physics tick (onTick), so it always follows the player
+        if (g_center1.empty()) pushCenter(g_center1, pl->m_player1);
         drawCenter(n, g_center1, pl->m_player1);
         if (pl->m_gameState.m_isDualMode) {
-            pushCenter(g_center2, pl->m_player2);
+            if (g_center2.empty()) pushCenter(g_center2, pl->m_player2);
             drawCenter(n, g_center2, pl->m_player2);
         }
     }
@@ -517,9 +518,17 @@ namespace {
 
 // Called once per physics tick (Hooks.cpp): the trail gets one box per tick.
 void onTick(PlayLayer* pl) {
-    if (!Cfg::get().hitboxTrail || !pl->m_player1) return;
+    auto& c = Cfg::get();
+    if (!pl->m_player1) return;
+    bool dual = pl->m_gameState.m_isDualMode;
+    if (c.hitborders) {
+        pushCenter(g_center1, pl->m_player1);
+        if (dual) pushCenter(g_center2, pl->m_player2);
+        else g_center2.clear();
+    }
+    if (!c.hitboxTrail) return;
     push(g_trail1, pl->m_player1);
-    if (pl->m_gameState.m_isDualMode) push(g_trail2, pl->m_player2);
+    if (dual) push(g_trail2, pl->m_player2);
     else g_trail2.clear();
 }
 

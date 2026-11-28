@@ -42,6 +42,7 @@ namespace practice {
 
 namespace layout {
     void apply(PlayLayer*);    // layout mode: hide decoration, paint hitbox objects white (or undo it)
+    void reset();              // forget everything about the current level (leaving / entering a level)
     bool skipObject(GameObject*);   // layout mode: true = do not add this object to the level at all
     // every level color change goes through this; false = ignore it (layout mode keeps bg/ground blue)
     bool filterColor(int colorID, cocos2d::ccColor3B& color, float& fadeTime, int& copyID);
@@ -79,6 +80,7 @@ namespace counter {
     enum class Mode { Disabled = 0, Record = 1, Playback = 2 };
 
     void onLevelEnter(PlayLayer*);
+    void onLevelExit();                                            // stop counting, free the saved checkpoints
     bool filterInput(bool down, int button, bool p1);              // false = swallow the real input
     void onInput(GJBaseGameLayer*, bool down, int button, bool p1);
     void beforeStep(GJBaseGameLayer*);                             // inject macro / show cues
@@ -132,6 +134,7 @@ namespace view {
 
 namespace hud {
     void attach(PlayLayer*);
+    void detach();             // the level is going away: forget its labels
     void update(PlayLayer*);
     void flash(std::string const& text);
 }

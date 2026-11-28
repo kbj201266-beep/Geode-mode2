@@ -24,6 +24,12 @@ class $modify(KtPlayLayer, PlayLayer) {
                                callerObject, unk1, unk2);
     }
 
+    // layout mode: decoration and color / pulse / alpha triggers are left out of the level while it loads
+    void addObject(GameObject* obj) {
+        if (kt::layout::skipObject(obj)) return;
+        PlayLayer::addObject(obj);
+    }
+
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
         kt::hitbox::enter();
@@ -103,6 +109,11 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         }
         kt::counter::beforeStep(this);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        // hitbox trail: one box per physics tick (so it follows the TPS), not while counting
+        if (!isHalfTick && !g_fastForward) {
+            auto pl = PlayLayer::get();
+            if (pl && static_cast<GJBaseGameLayer*>(pl) == this) kt::hitbox::onTick(pl);
+        }
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {

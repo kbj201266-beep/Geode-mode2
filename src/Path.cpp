@@ -126,6 +126,8 @@ namespace {
 
         g_sim = true;
         g_simDead = false;
+        // g_sim must never stay on (the hitboxes stop being redrawn while it is on), whatever happens inside
+        struct SimOff { ~SimOff() { g_sim = false; } } simOff;
         if (hold) g_fake->pushButton(PlayerButton::Jump);
         else g_fake->releaseButton(PlayerButton::Jump);
         pts.push_back(g_fake->getPosition());
@@ -135,7 +137,6 @@ namespace {
             pts.push_back(g_fake->getPosition());
             if (hitsEnder()) break;
         }
-        g_sim = false;
     }
 
     void draw() {
@@ -178,6 +179,11 @@ void reset() {
     g_hold.clear();
     g_free.clear();
     g_sim = false;
+}
+
+void forget() {
+    g_fake = nullptr;          // its level was destroyed without telling us: leaking one dummy beats a crash
+    reset();
 }
 
 void update(PlayLayer* pl) {

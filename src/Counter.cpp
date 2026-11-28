@@ -9,12 +9,19 @@
 //  - Count:    1) one normal run of the replay from the level start. It records the player's path, where every
 //                 click and release happened, and saves a checkpoint a few frames before every click.
 //                 If the replay dies somewhere, the clicks before that point are still counted.
-//              2) for every click: load the checkpoint before it and
+//              2) for every click: respawn at the checkpoint before it and
+//                   - first replay it UNCHANGED (control run). If that does not survive, the checkpoint is not
+//                     exact: the frame offset is re-calibrated (0, +1, -1), and if it still fails this click is
+//                     counted with full level restarts instead. This is what guarantees correct windows - before,
+//                     a broken checkpoint made every shift die, so every click showed "1".
 //                   - shift the click (with its release) earlier / later by 1,2,3... frames  -> click window
 //                   - shift only the release earlier / later                                 -> release window
 //                 A shift "works" if the player survives until the NEXT click. window = early + late + 1.
-//                 No level restarts, so the attempt counter stays at 1 and it is fast.
+//                 The respawn goes through the game's own practice respawn (resetLevel with our checkpoint),
+//                 so every object, orb, trigger and moving block is reset exactly like a real respawn.
 //              3) when done, the level restarts from the beginning.
+//   Speed: while counting, the game is stepped as many times per rendered frame as fit into ~14 ms (only one
+//   picture is drawn per frame), so counting runs as fast as the device allows.
 //  - Play:     while you (or the bot) play, every click / release shows its window one by one as you reach it.
 // Replays are text files in <save dir>/replays/<name>.ktr:
 //   1 inputs "frame:down:p1;"            2 click results "frame:early:late:counted;"
@@ -32,13 +39,13 @@ namespace kt::counter {
 
 namespace {
     constexpr int kMaxSide = 12;         // search at most 12 frames each way -> window up to 25f
-    constexpr float kCountSpeed = 8.f;   // replay speed while counting
     constexpr float kNoPos = -1e9f;
     constexpr size_t kMaxLines = 16;     // trial lines kept on screen for the current click
+    constexpr int kCalib[3] = {0, 1, -1};   // frame offsets tried when the control run from a checkpoint fails
 
     enum class Phase { Idle, Baseline, Trial };
-    // sides of one click: 0 click earlier, 1 click later, 2 release earlier, 3 release later
-    enum Side { DownEarly = 0, DownLate = 1, RelEarly = 2, RelLate = 3 };
+    // sides of one click: 0 click earlier, 1 click later, 2 release earlier, 3 release later, 4 control (unchanged)
+    enum Side { DownEarly = 0, DownLate = 1, RelEarly = 2, RelLate = 3, Control = 4 };
 
     struct Click {
         int down = 0;        // index into macro
@@ -64,8 +71,16 @@ namespace {
         int trialSerial = 0;                 // bumps whenever the finished trial lines change
 
         std::vector<CheckpointObject*> cps;  // retained checkpoint a few frames before each click
-        std::vector<int> cpFrame;
+        std::vector<int> cpFrame;            // planned frame of each checkpoint
+        std::vector<int> cpAt;               // frame it was really taken on
+        std::vector<signed char> cpOk;       // -1 not tested yet, 1 checkpoint replays exactly, 0 broken (use restarts)
         size_t nextCp = 0;
+        int frameShift = 0;                  // added to the game's frame counter after a checkpoint respawn
+        int pendingCp = -1;                  // frame of the checkpoint that is being loaded right now
+        int calibIdx = 0;                    // which kCalib value the control run uses
+        int bestShift = 0;                   // the calibration that worked last (tried first for the next click)
+        int fallbacks = 0;                   // clicks that had to be counted with full restarts
+        bool reached = false;                // the current run survived until its check frame
         std::vector<CCPoint> trialPath;      // path of the running trial
         std::vector<TrialLine> lines;        // finished trials of the current click
 
@@ -90,8 +105,12 @@ namespace {
 
     bool active() { return s.phase != Phase::Idle; }
     bool playing() { return s.mode == Mode::Playback && !s.macro.empty() && !active(); }
-    int frameOf(GJBaseGameLayer* l) { return l->m_gameState.m_currentProgress; }
+    int rawFrame(GJBaseGameLayer* l) { return static_cast<int>(l->m_gameState.m_currentProgress); }
+    int frameOf(GJBaseGameLayer* l) { return rawFrame(l) + (s.phase != Phase::Idle ? s.frameShift : 0); }
     bool hasPos(CCPoint const& p) { return p.x > kNoPos / 2; }
+
+    // frame offset used for the current control run: the one that worked last first, then 0 / +1 / -1
+    int calibShift() { return s.calibIdx == 0 ? s.bestShift : kCalib[s.calibIdx]; }
 
     void syncTrial() { s.trial = s.macro; }
     void syncCursor(int frame) {
@@ -108,7 +127,11 @@ namespace {
         for (auto cp : s.cps) if (cp) cp->release();
         s.cps.clear();
         s.cpFrame.clear();
+        s.cpAt.clear();
+        s.cpOk.clear();
         s.nextCp = 0;
+        s.frameShift = 0;
+        s.pendingCp = -1;
     }
 
     // ---------- (de)serialization ----------
@@ -299,6 +322,10 @@ namespace {
             return true;
         }
         auto& c = s.clicks[click];
+        if (side == Control) {               // unchanged inputs from this click's checkpoint
+            s.checkFrame = c.checkFrame;
+            return true;
+        }
         bool releaseOnly = side >= RelEarly;
         if (releaseOnly) {
             if (c.rel < 0) return false;
@@ -309,6 +336,8 @@ namespace {
             s.trial[c.down].frame += off;
             if (c.rel >= 0) s.trial[c.rel].frame += off;
             if (s.trial[c.down].frame >= c.checkFrame) return false;
+            // the respawn point is before the earliest press we try; never move a press in front of it
+            if (s.cpOk[click] != 0 && s.trial[c.down].frame < s.cpFrame[click]) return false;
         }
         for (size_t i = 0; i < s.trial.size(); ++i) {
             if (s.trial[i].frame < 1) return false;
@@ -320,8 +349,9 @@ namespace {
 
     void advanceClick() {
         ++s.k;
-        s.dir = DownEarly;
-        s.off = -1;
+        s.dir = Control;
+        s.off = 0;
+        s.calibIdx = 0;
         s.lines.clear();
         ++s.trialSerial;
     }
@@ -353,6 +383,7 @@ namespace {
         // completes again because the counter swallowed it). Restart so the level can be played normally.
         s.restartAfter = true;
         s.msg = why;
+        s.reached = false;
         s.lines.clear();
         ++s.trialSerial;
         s.trialPath.clear();
@@ -367,7 +398,9 @@ namespace {
             buildCues();
             autosave();
         }
-        stop("Done - " + std::to_string(s.limit) + " clicks counted");
+        int fb = s.fallbacks;
+        stop("Done - " + std::to_string(s.limit) + " clicks counted" +
+             (fb ? " (" + std::to_string(fb) + " with restarts)" : std::string()));
         FMODAudioEngine::sharedEngine()->playEffect(std::string("ding_9.wav"_spr), 1.f, 1.f, 1.f);
     }
 
@@ -389,7 +422,25 @@ namespace {
                 s.limit = usable;
             }
             s.phase = Phase::Trial;
-            s.k = 0; s.dir = DownEarly; s.off = -1;
+            s.k = 0; s.dir = Control; s.off = 0; s.calibIdx = 0;
+        } else if (s.dir == Control) {
+            // control run: the unchanged replay from this click's checkpoint must survive
+            if (ok) {
+                if (s.cpOk[s.k] != 0) {
+                    s.cpOk[s.k] = 1;
+                    s.bestShift = calibShift();
+                }
+                s.dir = DownEarly;
+                s.off = -1;
+            } else if (s.cpOk[s.k] != 0 && s.calibIdx + 1 < 3) {
+                ++s.calibIdx;                // try the checkpoint again with another frame offset
+            } else {
+                // the checkpoint cannot reproduce the run: count this click with full restarts (slow but exact)
+                if (s.cpOk[s.k] != 0) ++s.fallbacks;
+                s.cpOk[s.k] = 0;
+                s.dir = DownEarly;
+                s.off = -1;
+            }
         } else {
             if (!s.trialPath.empty()) {
                 s.lines.push_back({s.trialPath, ok});
@@ -468,13 +519,19 @@ void beforeStep(GJBaseGameLayer* l) {
         auto pl = PlayLayer::get();
         while (pl && s.nextCp < s.cpFrame.size() && s.cpFrame[s.nextCp] <= f) {
             if (!s.cps[s.nextCp]) {
-                if (auto cp = pl->createCheckpoint()) { cp->retain(); s.cps[s.nextCp] = cp; }
+                if (auto cp = pl->createCheckpoint()) {
+                    cp->retain();
+                    s.cps[s.nextCp] = cp;
+                    s.cpAt[s.nextCp] = f;
+                }
             }
             ++s.nextCp;
         }
     } else if (s.phase == Phase::Trial && f % 2 == 0 && l->m_player1) {
         s.trialPath.push_back(l->m_player1->getPosition());
     }
+    // survived until the check frame: success, whatever happens later in the same burst of steps
+    if (active() && s.checkFrame > 0 && f >= s.checkFrame && !s.trialDead) s.reached = true;
 
     if (active() || playing()) {
         s.injecting = true;
@@ -512,6 +569,7 @@ void beforeStep(GJBaseGameLayer* l) {
 
 bool onDeath(PlayLayer* pl) {
     if (!active()) return false;
+    if (s.reached || s.needReset) return true;     // already decided: deaths after the check frame do not count
     if (!s.trialDead) s.deathFrame = frameOf(pl);
     s.trialDead = true;
     return true;
@@ -535,6 +593,12 @@ bool onComplete(PlayLayer*) {
 
 // Called after every level reset AND every checkpoint load.
 void onReset(PlayLayer* pl) {
+    if (active()) {
+        // after a checkpoint respawn the game's frame counter may not continue where the checkpoint was
+        // taken: line our frames up with the checkpoint (plus the calibration offset of the control run)
+        s.frameShift = s.pendingCp >= 0 ? s.pendingCp - rawFrame(pl) + calibShift() : 0;
+        s.reached = false;
+    }
     int f = frameOf(pl);
     if (s.armed && f <= 1) {
         s.armed = false;
@@ -563,16 +627,31 @@ void update(PlayLayer* pl) {
     if (!active()) return;
     if (s.needReset) {
         s.needReset = false;
-        bool useCp = s.phase == Phase::Trial && s.k < static_cast<int>(s.cps.size()) && s.cps[s.k];
-        if (useCp) pl->loadFromCheckpoint(s.cps[s.k]);
-        else pl->resetLevelFromStart();
+        bool useCp = s.phase == Phase::Trial && s.k < static_cast<int>(s.cps.size()) && s.cps[s.k] && s.cpOk[s.k] != 0;
+        if (useCp) {
+            // a real practice respawn at OUR checkpoint: resetLevel resets the whole level (orbs, triggers,
+            // moving objects...) and then loads the last checkpoint - exactly what happens when you die
+            s.pendingCp = s.cpAt[s.k];
+            auto arr = CCArray::create();
+            arr->addObject(s.cps[s.k]);
+            auto oldArr = pl->m_checkpointArray;
+            bool oldPractice = pl->m_isPracticeMode;
+            pl->m_checkpointArray = arr;
+            pl->m_isPracticeMode = true;
+            pl->resetLevel();
+            pl->m_checkpointArray = oldArr;
+            pl->m_isPracticeMode = oldPractice;
+        } else {
+            s.pendingCp = -1;
+            pl->resetLevelFromStart();
+        }
         return;
     }
-    int f = frameOf(pl);
-    if (s.completed) finish(true);
+    if (s.completed || s.reached) finish(true);
     else if (s.trialDead) finish(false);
-    else if (f >= s.checkFrame && s.checkFrame > 0) finish(true);
 }
+
+bool pendingReset() { return active() && s.needReset; }
 
 // ================= UI-facing API =================
 
@@ -605,11 +684,27 @@ void startCounting() {
     s.cueCursor = 0;
     s.lastCue = -1;
     releaseCps();
-    s.cps.assign(s.clicks.size(), nullptr);
-    s.cpFrame.resize(s.clicks.size());
-    for (size_t i = 0; i < s.clicks.size(); ++i) {
-        s.cpFrame[i] = std::max(0, s.macro[s.clicks[i].down].frame - kMaxSide - 2);
+    size_t nc = s.clicks.size();
+    s.cps.assign(nc, nullptr);
+    s.cpFrame.assign(nc, 0);
+    s.cpAt.assign(nc, 0);
+    s.cpOk.assign(nc, -1);
+    for (size_t i = 0; i < nc; ++i) {
+        int down = s.clicks[i].down;
+        int cpf = std::max(0, s.macro[down].frame - kMaxSide - 2);
+        // never respawn while the button is still held from the previous click (a respawn forgets the hold):
+        // move the checkpoint after that click's release
+        for (int j = down - 1; j >= 0; --j) {
+            if (s.macro[j].p1 != s.macro[down].p1) continue;
+            if (!s.macro[j].down) cpf = std::max(cpf, std::min(s.macro[j].frame + 1, s.macro[down].frame));
+            break;
+        }
+        s.cpFrame[i] = cpf;
     }
+    s.fallbacks = 0;
+    s.bestShift = 0;
+    s.calibIdx = 0;
+    s.reached = false;
     s.path.clear();
     s.lines.clear();
     ++s.trialSerial;
@@ -626,7 +721,9 @@ void startCounting() {
     ++s.version;
 }
 
-float speedFactor() { return active() ? kCountSpeed : 1.f; }
+// counting no longer speeds up time (that only made each frame take bigger steps); Hooks.cpp instead runs
+// many game steps per frame while counting
+float speedFactor() { return 1.f; }
 
 void cancelCounting() { if (active()) stop("Stopped"); }
 

@@ -8,8 +8,9 @@
 namespace kt {
 
 namespace hitbox {
+    void enter();              // new level: forget cached objects and nodes
     void update(PlayLayer*);   // draws hitboxes / borders / trail each frame
-    void reset();              // clears trail history
+    void reset();              // clears trail history (on every death / restart)
 }
 
 namespace path {
@@ -39,7 +40,7 @@ namespace practice {
 }
 
 namespace layout {
-    void apply(PlayLayer*);    // layout mode / ultra low detail mode (or undo them)
+    void apply(PlayLayer*);    // layout mode: hide decoration, paint hitbox objects white (or undo it)
 }
 
 namespace counter {
@@ -107,6 +108,7 @@ namespace counter {
     std::vector<TrialLine> const& trialLines();
     std::vector<cocos2d::CCPoint> const& currentTrialPath();
     int version();               // changes whenever the overlay must be redrawn
+    int trialSerial();           // changes whenever a counting trial finished (trial lines must be redrawn)
 
     // replay files (each returns a short message for the user)
     std::string currentName();
@@ -119,6 +121,7 @@ namespace counter {
 }
 
 namespace view {
+    void reset();              // new level: forget cached nodes
     void update(PlayLayer*);   // window counter overlay: path, donut rings, window numbers, stats
 }
 

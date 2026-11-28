@@ -33,10 +33,15 @@ namespace {
     unsigned g_count = 0;
     bool g_built = false;
 
+    // Everything the preview can change on a real object. Orbs, pads and portals remember that they were used
+    // (m_activated / m_activatedByPlayer1/2); before, only m_isActivated was put back, so after the preview had
+    // touched an orb or pad the real player could not use it any more and the level state was off.
     struct Saved {
         GameObject* obj;
+        EnhancedGameObject* enh;      // null for plain objects
         GameObjectType type;
-        bool activated;
+        bool activated, disabled, disabled2;
+        bool enhActivated, byP1, byP2;
     };
     std::vector<Saved> g_saved;
     std::vector<GameObject*> g_enders;      // gamemode / dual / mirror portals inside the preview range
@@ -82,6 +87,7 @@ namespace {
         switch (o->m_objectID) {
             case 142: case 1329:                                          // secret / user coins
             case 1275: case 1587: case 1588: case 1589: case 1598: case 1614:   // keys / collectibles
+            case 1594:                                                    // toggle orb (switches groups on/off)
                 return true;
             default: return endsPreview(o->m_objectID);
         }
@@ -94,7 +100,14 @@ namespace {
                                    [](GameObject* o, float x) { return o->getPositionX() < x; });
         for (; it != g_inter.end() && (*it)->getPositionX() <= x1; ++it) {
             auto o = *it;
-            g_saved.push_back({o, o->m_objectType, o->m_isActivated});
+            Saved sv{o, typeinfo_cast<EnhancedGameObject*>(o), o->m_objectType, o->m_isActivated, o->m_isDisabled,
+                     o->m_isDisabled2, false, false, false};
+            if (sv.enh) {
+                sv.enhActivated = sv.enh->m_activated;
+                sv.byP1 = sv.enh->m_activatedByPlayer1;
+                sv.byP2 = sv.enh->m_activatedByPlayer2;
+            }
+            g_saved.push_back(sv);
             if (o->m_objectType == GameObjectType::Breakable) o->m_objectType = GameObjectType::Solid;
             else if (untouchable(o)) o->m_objectType = GameObjectType::Decoration;
             if (endsPreview(o->m_objectID)) g_enders.push_back(o);
@@ -104,6 +117,13 @@ namespace {
         for (auto& s : g_saved) {
             s.obj->m_objectType = s.type;
             s.obj->m_isActivated = s.activated;
+            s.obj->m_isDisabled = s.disabled;
+            s.obj->m_isDisabled2 = s.disabled2;
+            if (s.enh) {
+                s.enh->m_activated = s.enhActivated;
+                s.enh->m_activatedByPlayer1 = s.byP1;
+                s.enh->m_activatedByPlayer2 = s.byP2;
+            }
         }
         g_saved.clear();
     }

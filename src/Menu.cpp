@@ -464,10 +464,17 @@ namespace {
             m_summary = text("", 0.f, m_y - 12.f, 0.26f, kText, m_content);
             m_summary->setAnchorPoint({0.f, 1.f});
 
-            // Antic's Counter installed next to this mod: say so, and how to keep them from disturbing each other
-            if (Loader::get()->isModLoaded("anticroom.antics-counter")) {
-                text("Antic's Counter found: count with its pause-menu button.", 0.f, -H + 58.f, 0.24f, kMuted, m_content);
-                text("Turn Noclip off while it counts.", 0.f, -H + 48.f, 0.24f, kMuted, m_content);
+            // other mods that hook the same game functions (bots, noclip, speedhack, practice fix): say which
+            // ones are installed and what to turn off, since their features change the runs being counted
+            auto loaded = [](char const* id) { return Loader::get()->isModLoaded(id); };
+            std::string others;
+            if (loaded("peony.silicate")) others += "Silicate ";
+            if (loaded("thesillydoggo.qolmod")) others += "QOLMod ";
+            if (loaded("anticroom.antics-counter")) others += "Antic's-Counter ";
+            if (!others.empty()) {
+                text("Also installed: " + others, 0.f, -H + 46.f, 0.22f, kAccent, m_content);
+                text("While counting / recording, turn THEIR noclip, speedhack,", 0.f, -H + 37.f, 0.22f, kMuted, m_content);
+                text("practice fix and bot (record/playback) off.", 0.f, -H + 28.f, 0.22f, kMuted, m_content);
             }
         }
 

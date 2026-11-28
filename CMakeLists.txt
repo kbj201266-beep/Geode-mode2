@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-project(GDToolkit VERSION 1.1.0)
+project(GDToolkit VERSION 1.2.0)
 
 # Windows: the GitHub runner's Visual Studio library can be newer than its clang and then refuses to compile
 # ("STL1000: Unexpected compiler version"). This tells it to accept the compiler anyway.

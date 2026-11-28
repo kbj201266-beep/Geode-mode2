@@ -1,4 +1,9 @@
 // Every hook of the mod lives here (one $modify per class) so two features never hook the same function twice.
+//
+// Hook order: the hooks the window counter / bot depend on run FIRST, before other mods (Silicate, QOLMod,
+// other bots and counters hook the same functions). Otherwise, for example, another mod's noclip swallowed the
+// death before the counter ever saw it, or another practice fix overwrote the player after our respawn - and the
+// counter could not count on Windows, where those mods are usually installed.
 #include "Common.hpp"
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -17,6 +22,10 @@ namespace {
     // the game already runs frames while a level is still loading, and touching the previous level's nodes then
     // was a crash when entering a level.
     PlayLayer* g_ready = nullptr;
+    // the level is still alive but another scene was put on top of it (it comes back when that one closes).
+    // Before, this was treated like quitting: everything stopped and never came back - the hitboxes and the
+    // yellow center line froze until the level was re-entered.
+    PlayLayer* g_away = nullptr;
 
     // everything that holds pointers into a level lets go of them while that level still exists
     void leaveLevel() {
@@ -27,10 +36,50 @@ namespace {
         kt::hud::detach();
         kt::layout::reset();
         g_ready = nullptr;
+        g_away = nullptr;
     }
+
+    // Lives as a child of the PlayLayer and dies with it. If a level is destroyed without onQuit / onExit
+    // reaching us (e.g. it was under another scene that got replaced), the mod forgets it here instead of
+    // touching freed nodes later.
+    class LevelGuard : public CCNode {
+    public:
+        PlayLayer* m_owner = nullptr;
+        static LevelGuard* create(PlayLayer* owner) {
+            auto r = new LevelGuard();
+            if (r->init()) {
+                r->m_owner = owner;
+                r->setID("kt-level-guard");
+                r->autorelease();
+                return r;
+            }
+            delete r;
+            return nullptr;
+        }
+        ~LevelGuard() override {
+            if (!m_owner || (g_ready != m_owner && g_away != m_owner)) return;
+            kt::counter::onLevelExit();
+            kt::path::forget();       // never touch the dummy: its level is being destroyed right now
+            kt::hitbox::enter();
+            kt::view::reset();
+            kt::hud::detach();
+            kt::layout::reset();
+            g_ready = nullptr;
+            g_away = nullptr;
+        }
+    };
 }
 
 class $modify(KtPlayLayer, PlayLayer) {
+    static void onModify(auto& self) {
+        (void)self.setHookPriority("PlayLayer::destroyPlayer", Priority::First);
+        (void)self.setHookPriority("PlayLayer::resetLevel", Priority::First);
+        (void)self.setHookPriority("PlayLayer::loadFromCheckpoint", Priority::First);
+        (void)self.setHookPriority("PlayLayer::storeCheckpoint", Priority::First);
+        (void)self.setHookPriority("PlayLayer::levelComplete", Priority::First);
+        (void)self.setHookPriority("PlayLayer::postUpdate", Priority::First);
+    }
+
     // every color change of the level (color triggers, level start colors) - layout mode keeps bg/ground blue
     void updateColor(ccColor3B& color, float fadeTime, int colorID, bool blending, float opacity, ccHSVValue& copyHSV,
                      int colorIDToCopy, bool copyOpacity, EffectGameObject* callerObject, int unk1, int unk2) {
@@ -55,19 +104,38 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::hud::attach(this);
         kt::layout::apply(this);
         kt::counter::onLevelEnter(this);
+        if (auto guard = LevelGuard::create(this)) this->addChild(guard);
         g_ready = this;
+        g_away = nullptr;
     }
 
     void onQuit() {
         kt::counter::cancelCounting();     // never leave the game running at counting speed
-        leaveLevel();
+        if (g_ready == this || g_away == this) leaveLevel();
         PlayLayer::onQuit();
     }
 
-    // also covers leaving the level any other way than the pause menu
+    // Leaving the level any other way than the pause menu (another mod replacing the scene...) cleans up.
+    // A scene pushed ON TOP of the level (it stays alive underneath) only pauses the mod until it comes back.
     void onExit() {
-        if (g_ready == this) leaveLevel();
+        if (g_ready == this) {
+            if (CCDirector::get()->isSendCleanupToScene()) {
+                leaveLevel();
+            } else {
+                g_away = this;
+                g_ready = nullptr;
+            }
+        }
         PlayLayer::onExit();
+    }
+
+    // the level is shown again (also after a scene on top of it was closed)
+    void onEnterTransitionDidFinish() {
+        PlayLayer::onEnterTransitionDidFinish();
+        if (g_away == this) {
+            g_away = nullptr;
+            g_ready = this;
+        }
     }
 
     void postUpdate(float dt) {
@@ -101,16 +169,25 @@ class $modify(KtPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
+        kt::counter::onLoadCheckpoint(this, nullptr);   // filled in below if this respawn loads a checkpoint
         PlayLayer::resetLevel();
         kt::hitbox::reset();
         kt::noclip::reset();
         kt::counter::onReset(this);
+        kt::counter::onLoadCheckpoint(this, nullptr);
         kt::practice::sync(this);
         kt::layout::apply(this);
     }
 
+    // a practice checkpoint is placed: the bot recorder remembers the whole player with it
+    void storeCheckpoint(CheckpointObject* cp) {
+        PlayLayer::storeCheckpoint(cp);
+        kt::counter::onStoreCheckpoint(this, cp);
+    }
+
     void loadFromCheckpoint(CheckpointObject* cp) {
         PlayLayer::loadFromCheckpoint(cp);
+        kt::counter::onLoadCheckpoint(this, cp);
         kt::counter::onReset(this);        // keeps the recording, cuts it back to the checkpoint frame
         kt::practice::sync(this);
     }
@@ -126,6 +203,12 @@ class $modify(KtPlayLayer, PlayLayer) {
 };
 
 class $modify(KtBaseLayer, GJBaseGameLayer) {
+    static void onModify(auto& self) {
+        (void)self.setHookPriority("GJBaseGameLayer::processCommands", Priority::First);
+        (void)self.setHookPriority("GJBaseGameLayer::handleButton", Priority::First);
+        (void)self.setHookPriority("GJBaseGameLayer::update", Priority::First);
+    }
+
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (!isHalfTick) {
             auto& c = Cfg::get();
@@ -134,7 +217,8 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         }
         kt::counter::beforeStep(this);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // hitbox trail: one box per physics tick (so it follows the TPS), not while counting
+        kt::counter::afterStep();
+        // hitbox trail / center line: one point per physics tick (so it follows the TPS), not while counting
         if (!isHalfTick && !g_fastForward && g_ready && static_cast<GJBaseGameLayer*>(g_ready) == this) {
             kt::hitbox::onTick(g_ready);
         }
@@ -196,23 +280,27 @@ class $modify(KtScheduler, CCScheduler) {
 
 #ifdef GEODE_IS_WINDOWS
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
-// Windows: the T key opens the menu - in a level (the game is paused first) and on the main menu.
-// Other screens are left alone so typing a "t" into a search box never opens it.
+// Windows: the T key opens the menu everywhere - main menu, level list, editor, pause menu, level complete
+// screen... - except while a level is actually being played (then T stays a normal game key) and while you
+// type into a text box.
 class $modify(KtKeyboard, CCKeyboardDispatcher) {
+    static bool menuKeyAllowed() {
+        if (kt::ui::isOpen()) return false;
+        if (auto ime = CCIMEDispatcher::sharedDispatcher(); ime && ime->hasDelegate()) return false;   // typing
+        auto scene = CCDirector::get()->getRunningScene();
+        if (!scene || typeinfo_cast<CCTransitionScene*>(scene)) return false;    // scene still changing
+        if (auto pl = PlayLayer::get()) {
+            bool finished = pl->m_hasCompletedLevel || pl->m_levelEndAnimationStarted;
+            if (!pl->m_isPaused && !finished) return false;                      // playing
+        }
+        if (auto el = LevelEditorLayer::get(); el && el->m_playbackMode == PlaybackMode::Playing) return false;
+        return true;
+    }
+
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double time) {
-        if (key == KEY_T && down && !repeat && !kt::ui::isOpen()) {
-            auto pl = PlayLayer::get();
-            auto scene = CCDirector::get()->getRunningScene();
-            bool onMenu = scene && scene->getChildByType<MenuLayer>(0);
-            if (pl && g_ready == pl) {
-                if (!pl->m_isPaused && !pl->m_hasCompletedLevel) pl->pauseGame(false);
-                kt::ui::open();
-                return true;
-            }
-            if (!pl && onMenu) {
-                kt::ui::open();
-                return true;
-            }
+        if (key == KEY_T && down && !repeat && menuKeyAllowed()) {
+            kt::ui::open();
+            return true;
         }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, time);
     }

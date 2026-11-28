@@ -5,9 +5,25 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
 
+#include <chrono>
+
 using namespace geode::prelude;
 
+namespace {
+    // true while the window counter runs many game steps inside one rendered frame: the overlays are then
+    // drawn once after the burst instead of after every step
+    bool g_fastForward = false;
+}
+
 class $modify(KtPlayLayer, PlayLayer) {
+    // every color change of the level (color triggers, level start colors) - layout mode keeps bg/ground blue
+    void updateColor(ccColor3B& color, float fadeTime, int colorID, bool blending, float opacity, ccHSVValue& copyHSV,
+                     int colorIDToCopy, bool copyOpacity, EffectGameObject* callerObject, int unk1, int unk2) {
+        if (!kt::layout::filterColor(colorID, color, fadeTime, colorIDToCopy)) return;
+        PlayLayer::updateColor(color, fadeTime, colorID, blending, opacity, copyHSV, colorIDToCopy, copyOpacity,
+                               callerObject, unk1, unk2);
+    }
+
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
         kt::hitbox::enter();
@@ -21,6 +37,7 @@ class $modify(KtPlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
+        if (g_fastForward) return;          // counting burst: drawn once afterwards
         kt::hitbox::update(this);
         kt::path::update(this);
         kt::counter::update(this);
@@ -94,11 +111,37 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
+    // Window counter: as many game steps per rendered frame as fit into ~14 ms. Each run that finishes is
+    // followed by the respawn for the next one right inside the burst, so dozens of runs fit in one frame.
+    void countBurst(PlayLayer* pl) {
+        auto& c = Cfg::get();
+        bool bypass = c.tpsBypass && c.tps >= 241.f;
+        float dt = bypass ? 1.f / c.tps : 1.f / 60.f;       // 1 tick (custom TPS) or 4 ticks (240 TPS) per call
+        auto t0 = std::chrono::steady_clock::now();
+        g_fastForward = true;
+        for (int i = 0; i < 4000; ++i) {
+            kt::counter::update(pl);                         // finish the run / respawn for the next one
+            if (!kt::counter::isCounting()) break;
+            if (kt::counter::pendingReset()) continue;
+            GJBaseGameLayer::update(dt);
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(14)) break;
+        }
+        g_fastForward = false;
+        kt::hitbox::update(pl);
+        kt::view::update(pl);
+        kt::hud::update(pl);
+    }
+
     // Physical TPS: run the game's own update() several times with dt = 1 / TPS (see Cheats.cpp).
     void update(float dt) {
         auto& c = Cfg::get();
         auto pl = PlayLayer::get();
-        if (!c.tpsBypass || c.tps < 241.f || !pl || static_cast<GJBaseGameLayer*>(pl) != this) {
+        bool mine = pl && static_cast<GJBaseGameLayer*>(pl) == this;
+        if (mine && kt::counter::isCounting() && !g_fastForward) {
+            countBurst(pl);
+            return;
+        }
+        if (!c.tpsBypass || c.tps < 241.f || !mine) {
             GJBaseGameLayer::update(dt);
             return;
         }
@@ -108,7 +151,7 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
     }
 };
 
-// Speedhack: scale every frame's delta time. Also drives the 8x speed of the window counter.
+// Speedhack: scale every frame's delta time.
 class $modify(KtScheduler, CCScheduler) {
     void update(float dt) {
         kt::speed::updatePitch();

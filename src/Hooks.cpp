@@ -13,6 +13,21 @@ namespace {
     // true while the window counter runs many game steps inside one rendered frame: the overlays are then
     // drawn once after the burst instead of after every step
     bool g_fastForward = false;
+    // true between setupHasCompleted and leaving the level. Nothing of the mod draws or simulates outside of it:
+    // the game already runs frames while a level is still loading, and touching the previous level's nodes then
+    // was a crash when entering a level.
+    PlayLayer* g_ready = nullptr;
+
+    // everything that holds pointers into a level lets go of them while that level still exists
+    void leaveLevel() {
+        kt::counter::onLevelExit();
+        kt::path::reset();        // releases the pathfinder dummy while its level is still alive
+        kt::hitbox::enter();
+        kt::view::reset();
+        kt::hud::detach();
+        kt::layout::reset();
+        g_ready = nullptr;
+    }
 }
 
 class $modify(KtPlayLayer, PlayLayer) {
@@ -35,14 +50,29 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::hitbox::enter();
         kt::path::reset();
         kt::view::reset();
+        kt::layout::reset();
         kt::noclip::reset();
         kt::hud::attach(this);
         kt::layout::apply(this);
         kt::counter::onLevelEnter(this);
+        g_ready = this;
+    }
+
+    void onQuit() {
+        kt::counter::cancelCounting();     // never leave the game running at counting speed
+        leaveLevel();
+        PlayLayer::onQuit();
+    }
+
+    // also covers leaving the level any other way than the pause menu
+    void onExit() {
+        if (g_ready == this) leaveLevel();
+        PlayLayer::onExit();
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
+        if (g_ready != this) return;        // level still loading / already left: touch nothing
         if (g_fastForward) return;          // counting burst: drawn once afterwards
         kt::hitbox::update(this);
         kt::path::update(this);
@@ -85,11 +115,6 @@ class $modify(KtPlayLayer, PlayLayer) {
         kt::practice::sync(this);
     }
 
-    void onQuit() {
-        kt::counter::cancelCounting();     // never leave the game running at counting speed
-        PlayLayer::onQuit();
-    }
-
     void levelComplete() {
         if (kt::counter::onComplete(this)) return;
         // Safe Mode: anything that changes gameplay marks the run as a test so nothing is submitted.
@@ -110,9 +135,8 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         kt::counter::beforeStep(this);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         // hitbox trail: one box per physics tick (so it follows the TPS), not while counting
-        if (!isHalfTick && !g_fastForward) {
-            auto pl = PlayLayer::get();
-            if (pl && static_cast<GJBaseGameLayer*>(pl) == this) kt::hitbox::onTick(pl);
+        if (!isHalfTick && !g_fastForward && g_ready && static_cast<GJBaseGameLayer*>(g_ready) == this) {
+            kt::hitbox::onTick(g_ready);
         }
     }
 
@@ -148,7 +172,7 @@ class $modify(KtBaseLayer, GJBaseGameLayer) {
         auto& c = Cfg::get();
         auto pl = PlayLayer::get();
         bool mine = pl && static_cast<GJBaseGameLayer*>(pl) == this;
-        if (mine && kt::counter::isCounting() && !g_fastForward) {
+        if (mine && pl == g_ready && kt::counter::isCounting() && !g_fastForward) {
             countBurst(pl);
             return;
         }

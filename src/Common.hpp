@@ -44,7 +44,7 @@ namespace practice {
 namespace layout {
     void apply(PlayLayer*);    // layout mode: hide decoration, paint hitbox objects white (or undo it)
     void reset();              // forget everything about the current level (leaving / entering a level)
-    bool skipObject(GameObject*);   // layout mode: true = do not add this object to the level at all
+    bool blockTrigger(GameObject*); // layout mode: true = this color / pulse / alpha trigger does nothing
     // every level color change goes through this; false = ignore it (layout mode keeps bg/ground blue)
     bool filterColor(int colorID, cocos2d::ccColor3B& color, float& fadeTime, int& copyID);
 }
@@ -98,6 +98,7 @@ namespace counter {
     void setMode(Mode);
     void startCounting();
     void cancelCounting();
+    void abortCounting(std::string const& why);   // stop counting and show why
     float speedFactor();         // always 1 (counting runs many steps per frame instead, see Hooks.cpp)
     bool isRecording();
     bool isCounting();
